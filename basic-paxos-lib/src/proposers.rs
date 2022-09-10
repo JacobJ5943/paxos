@@ -1,6 +1,6 @@
 use tracing::{info, instrument};
 
-use crate::{acceptors::Acceptor, PromiseReturn};
+use crate::{acceptors::Acceptor, PromiseReturn, SendToAcceptors};
 
 #[derive(Debug)]
 struct Proposer {
@@ -18,11 +18,12 @@ impl Proposer {
     /// # Errors
     ///
     /// This function will return an error if there is already an accepted value.  The value of the error will be that accepted value.
-    #[instrument]
-    fn propose_value(
+    #[instrument(skip(send_to_acceptors))]
+    async fn propose_value(
         &mut self,
         initial_proposed_value: usize,
-        mut acceptors: &mut Vec<Acceptor>,
+        send_to_acceptors: & impl SendToAcceptors,
+        acceptor_identifiers: &mut Vec<usize>,
         total_acceptor_count: usize,
     ) -> Result<(), usize> {
         info!("Proposing_value");
@@ -30,12 +31,19 @@ impl Proposer {
         let mut proposing_value = initial_proposed_value;
 
         let workign_promise_response: Option<PromiseReturn> = None;
-        let acceptor_response_iter = acceptors
-            .iter_mut()
-            // Send promise to all acceptors
-            .map(|acceptor| {
-                dbg!(acceptor.promise(self.current_highest_ballot + 1, self.node_identifier))
-            });
+
+        let mut acceptor_responses = Vec::new();
+        for acceptor_id in acceptor_identifiers.iter() {
+            acceptor_responses.push(
+                send_to_acceptors
+                    .send_promise(
+                        *acceptor_id,
+                        self.current_highest_ballot + 1,
+                        self.node_identifier,
+                    )
+                    .await,
+            );
+        }
 
         let mut working_accepted_value = None;
         let mut highest_ballot_for_accepted_value = None;
@@ -51,7 +59,7 @@ impl Proposer {
         let mut ok_count = 0;
         // I don't like the enumerator index keeping track of which acceptor this is
         // This won't translate well to when these are async
-        for (acceptor_index, response) in acceptor_response_iter.enumerate() {
+        for (acceptor_index, response) in acceptor_responses.iter().enumerate() {
             match response {
                 Ok(_) => ok_count += 1,
                 Err(error_response) => {
@@ -139,16 +147,24 @@ impl Proposer {
 
         dbg!(self.current_highest_ballot);
 
-        let accepted_count = acceptors
-            .iter_mut()
-            .map(|acceptor| {
-                acceptor.accept(
-                    self.current_highest_ballot + 1,
-                    self.node_identifier,
-                    proposing_value,
-                )
-            })
-            .filter(Result::is_ok)
+        let mut accept_responses = Vec::new();
+
+        for acceptor_id in acceptor_identifiers.iter() {
+            accept_responses.push(
+                send_to_acceptors
+                    .send_accept(
+                        *acceptor_id,
+                        proposing_value,
+                        self.current_highest_ballot + 1,
+                        self.node_identifier,
+                    )
+                    .await,
+            );
+        }
+
+        let accepted_count = accept_responses
+            .iter()
+            .filter(|result| result.is_ok())
             .count();
 
         if accepted_count >= (total_acceptor_count / 2) + 1 {
@@ -166,7 +182,43 @@ impl Proposer {
 
 #[cfg(test)]
 mod prop_tests {
-    use crate::{acceptors::Acceptor, proposers::Proposer};
+
+    struct LocalSendToAcceptor {
+        acceptors: Arc<Mutex<Vec<Acceptor>>>,
+    }
+    impl LocalSendToAcceptor {
+        fn new(acceptors: Arc<Mutex<Vec<Acceptor>>>) -> Self {
+            Self { acceptors }
+        }
+    }
+
+    #[async_trait]
+    impl SendToAcceptors for LocalSendToAcceptor {
+        async fn send_accept(
+            &self,
+            acceptor_identifier: usize,
+            value: usize,
+            ballot_num: usize,
+            proposer_identifier: usize,
+        ) -> Result<(), ()> {
+            self.acceptors.lock().unwrap()[acceptor_identifier].accept(ballot_num, proposer_identifier, value)
+        }
+
+        async fn send_promise(
+            &self,
+            acceptor_identifier: usize,
+            ballot_num: usize,
+            proposer_identifer: usize,
+        ) -> Result<(), PromiseReturn> {
+            self.acceptors.lock().unwrap()[acceptor_identifier].promise(ballot_num, proposer_identifer)
+        }
+    }
+
+    use std::{cell::RefCell, rc::Rc, sync::{Mutex, Arc}};
+
+    use async_trait::async_trait;
+
+    use crate::{acceptors::Acceptor, proposers::Proposer, SendToAcceptors, PromiseReturn};
 
     // IMPORTANT TODO look into tracing-test crate
     #[test]
@@ -187,20 +239,22 @@ mod prop_tests {
         assert_eq!(result, 4);
     }
 
-    #[test]
-    fn test_only_one_proposer() {
+    #[tokio::test]
+    async fn test_only_one_proposer() {
         let mut acceptors = vec![
             Acceptor::default(),
             Acceptor::default(),
             Acceptor::default(),
         ];
 
+        let mut local_sender = LocalSendToAcceptor::new(Arc::new(Mutex::new(acceptors)));
+
         let mut proposer = Proposer {
             current_highest_ballot: 0,
             node_identifier: 0,
         };
 
-        let result = proposer.propose_value(5, &mut acceptors, 5);
+        let result = proposer.propose_value(5,&local_sender, &mut vec![0,1,2], 5).await;
 
         assert!(result.is_ok());
         // Currently this is manually being checked by looking at the tracing output
@@ -208,9 +262,11 @@ mod prop_tests {
         //todo!();
     }
 
-    #[test]
-    fn test_proposer_a_sends_2_to_two_then_proposer_b_sends_3_to_all_3() {
-        let mut acceptors = vec![Acceptor::default(), Acceptor::default()];
+    #[tokio::test]
+    async fn test_proposer_a_sends_2_to_two_then_proposer_b_sends_3_to_all_3() {
+        let mut acceptors = vec![Acceptor::default(), Acceptor::default(), Acceptor::default()];
+        let mut local_sender = LocalSendToAcceptor::new(Arc::new(Mutex::new(acceptors)));
+        let mut acceptors = vec![0,1];
 
         let mut proposer_a = Proposer {
             current_highest_ballot: 0,
@@ -222,9 +278,9 @@ mod prop_tests {
             node_identifier: 1,
         };
 
-        let prop_a_result = proposer_a.propose_value(2, &mut acceptors, 3);
-        acceptors.push(Acceptor::default());
-        let prop_b_result = proposer_b.propose_value(5, &mut acceptors, 3);
+        let prop_a_result = proposer_a.propose_value(2,&local_sender, &mut acceptors, 3).await;
+        acceptors.push(2);
+        let prop_b_result = proposer_b.propose_value(5, &local_sender, &mut acceptors, 3).await;
 
         assert!(prop_a_result.is_ok());
         assert!(prop_b_result.is_err());
@@ -235,8 +291,8 @@ mod prop_tests {
     // Currently if the acceptors are promised to a proposer.  If a proposer sends a higher ballot number they will accept it.
     // This means after the proposer has sent out all of the promises it can just send an accept with the higher number
     // so the acceptors should accept the value, but might not change their highest ballot count.
-    #[test]
-    fn test_take_highest_value_ballot_count() {
+    #[tokio::test]
+    async fn test_take_highest_value_ballot_count() {
         // I should probably set the node identifier so I don't rely on the default?
         let mut acceptors = vec![
             Acceptor::default(),
@@ -247,17 +303,21 @@ mod prop_tests {
         acceptors[1].promised_ballot_num = Some(7);
         acceptors[2].promised_ballot_num = Some(4);
 
+
+        let mut local_sender = LocalSendToAcceptor::new(Arc::new(Mutex::new(acceptors)));
+        let mut acceptors = vec![0,1,2];
+
         let mut proposer_a = Proposer {
             current_highest_ballot: 0,
             node_identifier: 0,
         };
 
-        let prop_a_result = proposer_a.propose_value(2, &mut acceptors, 3);
+        let prop_a_result = proposer_a.propose_value(2,&local_sender, &mut acceptors, 3).await;
         assert_eq!(proposer_a.current_highest_ballot, 7);
 
-        assert_eq!(acceptors[0].accepted_value, Some(2));
-        assert_eq!(acceptors[1].accepted_value, Some(2));
-        assert_eq!(acceptors[2].accepted_value, Some(2));
+        assert_eq!(local_sender.acceptors.lock().unwrap()[0].accepted_value, Some(2));
+        assert_eq!(local_sender.acceptors.lock().unwrap()[1].accepted_value, Some(2));
+        assert_eq!(local_sender.acceptors.lock().unwrap()[2].accepted_value, Some(2));
         //assert_eq!(acceptors[0].promised_ballot_num,Some(8));
         //assert_eq!(acceptors[1].promised_ballot_num,Some(8));
         //assert_eq!(acceptors[2].promised_ballot_num,Some(8));

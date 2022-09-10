@@ -1,3 +1,5 @@
+use async_trait::async_trait;
+
 mod acceptors;
 
 mod proposers;
@@ -10,7 +12,14 @@ struct PromiseReturn {
     accepted_value:Option<usize>
 }
 
+#[async_trait]
+/// DO I want this to send to all acceptors or just one?
+/// 
+trait SendToAcceptors {
 
+    async fn send_accept(&self, acceptor_identifier:usize, value:usize, ballot_num:usize, proposer_identifier:usize) -> Result<(),()>;
+    async fn send_promise(&self, acceptor_identifier:usize, ballot_num:usize, proposer_identifier:usize)-> Result<(), PromiseReturn>;
+}
 
 
 // These will contain the integration tests
