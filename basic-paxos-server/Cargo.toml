@@ -1,0 +1,15 @@
+[package]
+name = "basic-paxos-server"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+async-trait = "0.1.57"
+axum = {version="0.5.15", features=["json"]}
+serde = { version = "1.0.144", features = ["derive"] }
+tokio = { version = "1.21.0", features = ["full"] }
+basic-paxos-lib = {version="0.1.0", path = "../basic-paxos-lib"}
+hyper = { version = "0.14.20", features = ["client"] }
+serde_json = "1.0.85"

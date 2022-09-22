@@ -1,12 +1,12 @@
 use async_trait::async_trait;
 
-mod acceptors;
+pub mod acceptors;
 
-mod proposers;
+pub mod proposers;
 
 
 #[derive(Debug, PartialEq, Eq)]
-struct PromiseReturn {
+pub struct PromiseReturn {
     highest_ballot_num:usize,
     highest_node_identifier:usize,
     accepted_value:Option<usize>
@@ -15,7 +15,7 @@ struct PromiseReturn {
 #[async_trait]
 /// DO I want this to send to all acceptors or just one?
 /// 
-trait SendToAcceptors {
+pub trait SendToAcceptors {
 
     async fn send_accept(&self, acceptor_identifier:usize, value:usize, ballot_num:usize, proposer_identifier:usize) -> Result<(),()>;
     async fn send_promise(&self, acceptor_identifier:usize, ballot_num:usize, proposer_identifier:usize)-> Result<(), PromiseReturn>;

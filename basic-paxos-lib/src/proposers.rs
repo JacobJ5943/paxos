@@ -3,7 +3,7 @@ use tracing::{info, instrument};
 use crate::{acceptors::Acceptor, PromiseReturn, SendToAcceptors};
 
 #[derive(Debug)]
-struct Proposer {
+pub struct Proposer {
     pub current_highest_ballot: usize,
     pub node_identifier: usize,
 }
@@ -19,7 +19,7 @@ impl Proposer {
     ///
     /// This function will return an error if there is already an accepted value.  The value of the error will be that accepted value.
     #[instrument(skip(send_to_acceptors))]
-    async fn propose_value(
+    pub async fn propose_value(
         &mut self,
         initial_proposed_value: usize,
         send_to_acceptors: & impl SendToAcceptors,
