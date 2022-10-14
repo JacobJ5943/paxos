@@ -25,8 +25,9 @@ impl Proposer {
         send_to_acceptors: & impl SendToAcceptors,
         acceptor_identifiers: &mut Vec<usize>,
         total_acceptor_count: usize,
-    ) -> Result<(), usize> {
+    ) -> Result<(),usize> {
         info!("Proposing_value");
+        
         // This is mut for the case where an acceptor has already accepted a value
         let mut proposing_value = initial_proposed_value;
 
@@ -147,25 +148,25 @@ impl Proposer {
 
         dbg!(self.current_highest_ballot);
 
-        let mut accept_responses = Vec::new();
 
+        let mut accepted_count = 0;
+        // this is the error with main
         for acceptor_id in acceptor_identifiers.iter() {
-            accept_responses.push(
-                send_to_acceptors
-                    .send_accept(
+            /*let accept_result = send_to_acceptors
+                     .send_accept(
                         *acceptor_id,
                         proposing_value,
                         self.current_highest_ballot + 1,
                         self.node_identifier,
                     )
-                    .await,
-            );
+                    .await.is_ok();
+                    if accept_result {
+                        accepted_count += 1;
+                    }*/
+            //accept_responses.push(
+                //accept_result
+            //);
         }
-
-        let accepted_count = accept_responses
-            .iter()
-            .filter(|result| result.is_ok())
-            .count();
 
         if accepted_count >= (total_acceptor_count / 2) + 1 {
             // This means that the majority have accepted this value and it has been decided
@@ -200,7 +201,7 @@ mod prop_tests {
             value: usize,
             ballot_num: usize,
             proposer_identifier: usize,
-        ) -> Result<(), ()> {
+        ) -> Result<(),()> {
             self.acceptors.lock().unwrap()[acceptor_identifier].accept(ballot_num, proposer_identifier, value)
         }
 

@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use serde::{Serialize, Deserialize};
 
 pub mod acceptors;
 
@@ -6,6 +7,7 @@ pub mod proposers;
 
 
 #[derive(Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize)] // These should be behind a featuer flag probably
 pub struct PromiseReturn {
     highest_ballot_num:usize,
     highest_node_identifier:usize,
