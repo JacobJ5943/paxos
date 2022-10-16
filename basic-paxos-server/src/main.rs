@@ -342,10 +342,13 @@ impl basic_paxos_lib::SendToAcceptors for &SendToForwardServer {
 
         // Currently the accept function only returns a result
         let (parts, body): (_, Body) = response.into_parts();
-        let body = hyper::body::to_bytes(body)
-            .await
-            .unwrap_or_else(|_| todo!());
-        serde_json::from_slice(&body).unwrap_or_else(|_| todo!())
+
+        // I really need a way to encode a Result<(),()>
+        if let StatusCode::OK = parts.status {
+            Ok(())
+        } else {
+            Err(())
+        }
     }
 
     #[instrument]

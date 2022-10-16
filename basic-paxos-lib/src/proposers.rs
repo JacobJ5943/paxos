@@ -1,3 +1,4 @@
+use futures::{future, select, StreamExt};
 use tracing::{info, instrument};
 
 use crate::{acceptors::Acceptor, PromiseReturn, SendToAcceptors};
@@ -22,162 +23,124 @@ impl Proposer {
     pub async fn propose_value(
         &mut self,
         initial_proposed_value: usize,
-        send_to_acceptors: & impl SendToAcceptors,
+        send_to_acceptors: &impl SendToAcceptors,
         acceptor_identifiers: &mut Vec<usize>,
         total_acceptor_count: usize,
-    ) -> Result<(),usize> {
+    ) -> Result<(), usize> {
         info!("Proposing_value");
-        
+
         // This is mut for the case where an acceptor has already accepted a value
         let mut proposing_value = initial_proposed_value;
 
         let workign_promise_response: Option<PromiseReturn> = None;
 
-        let mut acceptor_responses = Vec::new();
+        let mut promise_futures = Vec::new();
+        self.current_highest_ballot += self.current_highest_ballot + 1;
         for acceptor_id in acceptor_identifiers.iter() {
-            acceptor_responses.push(
-                send_to_acceptors
-                    .send_promise(
-                        *acceptor_id,
-                        self.current_highest_ballot + 1,
-                        self.node_identifier,
-                    )
-                    .await,
-            );
+            promise_futures.push(send_to_acceptors.send_promise(
+                *acceptor_id,
+                self.current_highest_ballot,
+                self.node_identifier,
+            ));
         }
 
-        let mut working_accepted_value = None;
-        let mut highest_ballot_for_accepted_value = None;
-        let mut promise_again: Vec<Acceptor> = vec![];
-        // This is separate so that I can take the value of the acceptor with the highest ballot num
-        // no real reason other than having determinism for breaking ties in this case
-        // I'm sure this will change when I move to async.
-        let mut highest_ballot_no_value = None;
+        let mut futures_unsorted =
+            futures::stream::FuturesUnordered::from_iter(promise_futures.into_iter());
 
-        //  What really is the okay count?
-        // What if there is only one acceptor that has yet to accept a value
-        // How do I deal with the okay count there and what does it represent?
-        let mut ok_count = 0;
-        // I don't like the enumerator index keeping track of which acceptor this is
-        // This won't translate well to when these are async
-        for (acceptor_index, response) in acceptor_responses.iter().enumerate() {
-            match response {
-                Ok(_) => ok_count += 1,
-                Err(error_response) => {
-                    if error_response.highest_node_identifier == self.current_highest_ballot {
-                        // this is a really odd case, but easy to handle I guess. Just increase the self highest ballot count.  No promise needed
+        let quarem = ((acceptor_identifiers.len() as f64 / 2.0).ceil()) as usize;
 
-                        if error_response.accepted_value.is_some() {
-                            match highest_ballot_for_accepted_value {
-                                Some(highest_ballot_so_far) => {
-                                    ok_count += 1; // after changing highest_ballot_num this becomes an okay response
-                                    if error_response.highest_ballot_num > highest_ballot_so_far {
-                                        working_accepted_value = error_response.accepted_value;
-                                        highest_ballot_for_accepted_value =
-                                            Some(error_response.highest_ballot_num);
-                                    }
-                                }
-                                None => {
-                                    ok_count += 1; // after changing highest_ballot_num this becomes an okay response
-                                    working_accepted_value = error_response.accepted_value;
-                                    highest_ballot_for_accepted_value =
-                                        Some(error_response.highest_ballot_num);
-                                }
-                            }
-                        } else {
-                            // I don't know if I should be overwriting this value, but it seems to not matter
-                            if let Some(high_ballot) = highest_ballot_no_value {
-                                if error_response.highest_ballot_num > high_ballot {
-                                    highest_ballot_no_value =
-                                        Some(error_response.highest_ballot_num);
-                                }
+        let mut results_returned = Vec::new();
+
+        // Keep pulling from futures_unsorted until I have a majority of responses.
+        // From what I remember I need to wait for a majority of responses before I do some processing
+        for _ in 0..quarem {
+            let result = futures_unsorted.select_next_some().await;
+            results_returned.push(result);
+        }
+
+        // Once I have a majority of respones
+
+        let working_ballot = results_returned
+            .iter()
+            .reduce(|acc, next| {
+                if acc.is_ok() {
+                    next
+                } else {
+                    match (acc, next) {
+                        (Err(acc_err), Ok(())) => acc,
+                        (Err(acc_err), Err(next_err)) => {
+                            if (next_err.highest_ballot_num > acc_err.highest_ballot_num)
+                                || (next_err.highest_ballot_num == acc_err.highest_ballot_num
+                                    && next_err.highest_node_identifier
+                                        > acc_err.highest_node_identifier)
+                            {
+                                next
                             } else {
-                                highest_ballot_no_value = Some(error_response.highest_ballot_num);
+                                acc
                             }
                         }
-                    } else {
-                        match error_response.accepted_value {
-                            Some(accpeted_value) => {
-                                // This is the easy case.  We don't need to send another promise because it won't accept the value anyway
-
-                                match highest_ballot_for_accepted_value {
-                                    Some(highest_ballot_so_far) => {
-                                        if error_response.highest_ballot_num > highest_ballot_so_far
-                                        {
-                                            working_accepted_value = error_response.accepted_value;
-                                            highest_ballot_for_accepted_value =
-                                                Some(error_response.highest_ballot_num);
-                                        }
-                                    }
-                                    None => {
-                                        working_accepted_value = error_response.accepted_value;
-                                        highest_ballot_for_accepted_value =
-                                            Some(error_response.highest_ballot_num);
-                                    }
-                                }
-                            }
-                            None => {
-                                todo!()
-                                // This means that we need to send out another promise to this node if we want to send an accept
-                            }
+                        (_, _) => {
+                            // Acc is not ok
+                            unreachable!()
                         }
                     }
                 }
+            })
+            .unwrap(); // quarem must be greater than 0 as such there must be greater than 0 items in results_returned
+
+        // take the highest ballot num.  If it has a value then set the propsing value to that
+        match working_ballot {
+            Ok(()) => { // This means we are good to go
             }
-        }
-
-        for acceptor_index in promise_again {
-            // Send that promise with the new highest ballot count
-            todo!()
-        }
-
-        if let Some(high_ballot) = dbg!(highest_ballot_for_accepted_value) {
-            if high_ballot > self.current_highest_ballot {
-                self.current_highest_ballot = high_ballot;
+            Err(promise_return) => {
+                // Now the accepts should pass.
+                // This is where more promises may need to be sent with this ballot number
+                self.current_highest_ballot = promise_return.highest_ballot_num + 1;
+                if let Some(accepted_value) = promise_return.accepted_value {
+                    proposing_value = accepted_value;
+                }
             }
         };
-        if let Some(high_ballot) = dbg!(highest_ballot_no_value) {
-            if high_ballot > self.current_highest_ballot {
-                self.current_highest_ballot = high_ballot;
-            }
-        }
+        // I think I need to send out new promises again to all of the acceptors.  This may be a mistake in my understanding
 
-        if let Some(accepted_value) = working_accepted_value {
-            proposing_value = accepted_value;
-        }
+        // then once I have good promises back
 
-        dbg!(self.current_highest_ballot);
-
-
+        // Send out the accept to all of the acceptors
+        // The accepted value is once I get a majority of accept repsones with the same accepted value
         let mut accepted_count = 0;
         // this is the error with main
         for acceptor_id in acceptor_identifiers.iter() {
-            /*let accept_result = send_to_acceptors
-                     .send_accept(
-                        *acceptor_id,
-                        proposing_value,
-                        self.current_highest_ballot + 1,
-                        self.node_identifier,
-                    )
-                    .await.is_ok();
-                    if accept_result {
-                        accepted_count += 1;
-                    }*/
+            let accept_result = send_to_acceptors
+                .send_accept(
+                    *acceptor_id,
+                    proposing_value,
+                    self.current_highest_ballot + 1,
+                    self.node_identifier,
+                )
+                .await
+                .is_ok();
+            if accept_result {
+                accepted_count += 1;
+            }
             //accept_responses.push(
-                //accept_result
+            //accept_result
             //);
         }
 
-        if accepted_count >= (total_acceptor_count / 2) + 1 {
-            // This means that the majority have accepted this value and it has been decided
+        if accepted_count >= quarem {
+            // decided value
         }
 
-        // This doesn't account for if there was not a majority of acceptors
         if proposing_value != initial_proposed_value {
             Err(proposing_value)
         } else {
             Ok(())
         }
+
+        // I guess the big question is how do I handle situations where there is latency and responses don't come in at the same time
+        // or if there is contention
+        // Do I send out new promises to everyone with a new higher ballot?  Just that acceptor?  Do I update my ballot num and just keep using that and updating that.  Id on't think I will need to keep doing the same ballot nubmer for each acceptor
+        // Although I could just use the response from each acceptor and have a ballot number specific to each acceptor
     }
 }
 
@@ -201,8 +164,12 @@ mod prop_tests {
             value: usize,
             ballot_num: usize,
             proposer_identifier: usize,
-        ) -> Result<(),()> {
-            self.acceptors.lock().unwrap()[acceptor_identifier].accept(ballot_num, proposer_identifier, value)
+        ) -> Result<(), ()> {
+            self.acceptors.lock().unwrap()[acceptor_identifier].accept(
+                ballot_num,
+                proposer_identifier,
+                value,
+            )
         }
 
         async fn send_promise(
@@ -211,15 +178,20 @@ mod prop_tests {
             ballot_num: usize,
             proposer_identifer: usize,
         ) -> Result<(), PromiseReturn> {
-            self.acceptors.lock().unwrap()[acceptor_identifier].promise(ballot_num, proposer_identifer)
+            self.acceptors.lock().unwrap()[acceptor_identifier]
+                .promise(ballot_num, proposer_identifer)
         }
     }
 
-    use std::{cell::RefCell, rc::Rc, sync::{Mutex, Arc}};
+    use std::{
+        cell::RefCell,
+        rc::Rc,
+        sync::{Arc, Mutex},
+    };
 
     use async_trait::async_trait;
 
-    use crate::{acceptors::Acceptor, proposers::Proposer, SendToAcceptors, PromiseReturn};
+    use crate::{acceptors::Acceptor, proposers::Proposer, PromiseReturn, SendToAcceptors};
 
     // IMPORTANT TODO look into tracing-test crate
     #[test]
@@ -255,7 +227,9 @@ mod prop_tests {
             node_identifier: 0,
         };
 
-        let result = proposer.propose_value(5,&local_sender, &mut vec![0,1,2], 5).await;
+        let result = proposer
+            .propose_value(5, &local_sender, &mut vec![0, 1, 2], 5)
+            .await;
 
         assert!(result.is_ok());
         // Currently this is manually being checked by looking at the tracing output
@@ -265,9 +239,13 @@ mod prop_tests {
 
     #[tokio::test]
     async fn test_proposer_a_sends_2_to_two_then_proposer_b_sends_3_to_all_3() {
-        let mut acceptors = vec![Acceptor::default(), Acceptor::default(), Acceptor::default()];
+        let mut acceptors = vec![
+            Acceptor::default(),
+            Acceptor::default(),
+            Acceptor::default(),
+        ];
         let mut local_sender = LocalSendToAcceptor::new(Arc::new(Mutex::new(acceptors)));
-        let mut acceptors = vec![0,1];
+        let mut acceptors = vec![0, 1];
 
         let mut proposer_a = Proposer {
             current_highest_ballot: 0,
@@ -279,9 +257,13 @@ mod prop_tests {
             node_identifier: 1,
         };
 
-        let prop_a_result = proposer_a.propose_value(2,&local_sender, &mut acceptors, 3).await;
+        let prop_a_result = proposer_a
+            .propose_value(2, &local_sender, &mut acceptors, 3)
+            .await;
         acceptors.push(2);
-        let prop_b_result = proposer_b.propose_value(5, &local_sender, &mut acceptors, 3).await;
+        let prop_b_result = proposer_b
+            .propose_value(5, &local_sender, &mut acceptors, 3)
+            .await;
 
         assert!(prop_a_result.is_ok());
         assert!(prop_b_result.is_err());
@@ -304,21 +286,31 @@ mod prop_tests {
         acceptors[1].promised_ballot_num = Some(7);
         acceptors[2].promised_ballot_num = Some(4);
 
-
         let mut local_sender = LocalSendToAcceptor::new(Arc::new(Mutex::new(acceptors)));
-        let mut acceptors = vec![0,1,2];
+        let mut acceptors = vec![0, 1, 2];
 
         let mut proposer_a = Proposer {
             current_highest_ballot: 0,
             node_identifier: 0,
         };
 
-        let prop_a_result = proposer_a.propose_value(2,&local_sender, &mut acceptors, 3).await;
-        assert_eq!(proposer_a.current_highest_ballot, 7);
+        let prop_a_result = proposer_a
+            .propose_value(2, &local_sender, &mut acceptors, 3)
+            .await;
+        assert_eq!(proposer_a.current_highest_ballot, 8);
 
-        assert_eq!(local_sender.acceptors.lock().unwrap()[0].accepted_value, Some(2));
-        assert_eq!(local_sender.acceptors.lock().unwrap()[1].accepted_value, Some(2));
-        assert_eq!(local_sender.acceptors.lock().unwrap()[2].accepted_value, Some(2));
+        assert_eq!(
+            local_sender.acceptors.lock().unwrap()[0].accepted_value,
+            Some(2)
+        );
+        assert_eq!(
+            local_sender.acceptors.lock().unwrap()[1].accepted_value,
+            Some(2)
+        );
+        assert_eq!(
+            local_sender.acceptors.lock().unwrap()[2].accepted_value,
+            Some(2)
+        );
         //assert_eq!(acceptors[0].promised_ballot_num,Some(8));
         //assert_eq!(acceptors[1].promised_ballot_num,Some(8));
         //assert_eq!(acceptors[2].promised_ballot_num,Some(8));
