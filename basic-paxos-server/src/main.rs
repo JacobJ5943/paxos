@@ -73,7 +73,7 @@ async fn run_tokio_things(local_acceptor:Arc<Mutex<Acceptor>>, shared_state:Arc<
 
 fn main() -> Result<(), Box<dyn std::error::Error>>{
 
-    let args = dbg!(get_matches());
+    let args = get_matches();
     println!("Hello, world!");
 
 
@@ -164,7 +164,7 @@ struct AcceptRequestBody {
 async fn accept(
     acceptor_state: Extension<Arc<Mutex<basic_paxos_lib::acceptors::Acceptor>>>,
     Json(request_body): extract::Json<AcceptRequestBody>,
-) -> Result<(), ()> {
+) -> Json<Result<(), ()>> {
     info!("accepting_value");
     let mut lock = acceptor_state.lock().await;
     let result = lock.accept(
@@ -173,7 +173,7 @@ async fn accept(
         request_body.value,
     );
     dbg!("fuck yeah we finished accepting with result {}", result);
-    result
+    Json(result)
 }
 
 #[derive(Deserialize, Debug)]
@@ -198,7 +198,7 @@ async fn propose_value(
     Extension(local_proposer): Extension<Arc<Mutex<basic_paxos_lib::proposers::Proposer>>>,
     Extension(send_to_forward_server): Extension<Arc<SendToForwardServer>>, // I think it's fine for this to lock the whole proposer since all proposed values should be sequential for the node
                                                                             // I don't want this function to return until a value has been decided though so the single threaded thing wouldn't be a benefit necisarilyQ
-) -> Result<(), String> {
+) -> Json<Result<(), String>> {
     info!("proposing_value");
     let mut lock = local_proposer.lock().await;
     let mut acceptor_ports: Vec<usize> = acceptor_network_vec
@@ -218,8 +218,8 @@ async fn propose_value(
         )
         .await;
     match result {
-        Ok(_) => Ok(()),
-        Err(other_accepted_value) => Err(format! {"{other_accepted_value}"}),
+        Ok(_) => Json(Ok(())),
+        Err(other_accepted_value) => Json(Err(format! {"{other_accepted_value}"})),
     }
 }
 
@@ -235,7 +235,7 @@ struct PromiseRequest {
 async fn receive_promise(
     acceptor_state: Extension<Arc<Mutex<basic_paxos_lib::acceptors::Acceptor>>>,
     Json(request_body): extract::Json<PromiseRequest>,
-) -> Result<(), PromiseReturnWrapper> {
+) -> Json<Result<(), PromiseReturnWrapper>> {
     info!("recieing_promise");
     let result = acceptor_state
         .lock()
@@ -245,10 +245,12 @@ async fn receive_promise(
         "fuck yeah we finished processing the promise with result {}",
         &result
     );
-    result.map_err(|err| PromiseReturnWrapper(err))
+    
+    Json(result.map_err(|err| dbg!(dbg!(PromiseReturnWrapper(err)))))
 }
 
 #[derive(Debug)]
+#[derive(Serialize, Deserialize)] // These should be behind a featuer flag probably
 struct PromiseReturnWrapper(basic_paxos_lib::PromiseReturn);
 
 impl IntoResponse for PromiseReturnWrapper {
@@ -342,6 +344,7 @@ impl basic_paxos_lib::SendToAcceptors for &SendToForwardServer {
 
         // Currently the accept function only returns a result
         let (parts, body): (_, Body) = response.into_parts();
+        let result:Result<(),()> = dbg!(serde_json::from_slice(&hyper::body::to_bytes(body).await.unwrap()).unwrap());
 
         // I really need a way to encode a Result<(),()>
         if let StatusCode::OK = parts.status {
@@ -387,13 +390,16 @@ impl basic_paxos_lib::SendToAcceptors for &SendToForwardServer {
         let request = Request::from_parts(parts, body);
 
         let client = hyper::Client::new();
-        let response: hyper::Response<Body> = client.request(request).await.unwrap();
+        println!("sending request to promise");
+        let response: hyper::Response<Body> = dbg!(client.request(request).await.unwrap());
+        println!("we got the promise response");
 
         // Currently the accept function only returns a result
         let (parts, body): (_, Body) = response.into_parts();
-        let body = hyper::body::to_bytes(body)
-            .await
+        let body = dbg!(hyper::body::to_bytes(body)
+            .await)
             .unwrap_or_else(|_| todo!());
+
         if parts.status == StatusCode::OK && body.len() == 0 {
             Ok(())
         } else {

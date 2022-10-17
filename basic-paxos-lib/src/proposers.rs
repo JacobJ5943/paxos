@@ -58,8 +58,9 @@ impl Proposer {
             results_returned.push(result);
         }
 
-        // Once I have a majority of respones
-
+        // Once I have a majority of responses I am going to take the value of the highest ballot num returned.
+        // I'm not sure if I need to take the value of a different one if the highest ballot num does not have a value.
+        // for now I am taking the highest ballot num as is
         let working_ballot = results_returned
             .iter()
             .reduce(|acc, next| {
@@ -101,12 +102,18 @@ impl Proposer {
                 }
             }
         };
-        // I think I need to send out new promises again to all of the acceptors.  This may be a mistake in my understanding
+        // If the there was not a value we will keep trying the proposing value.
+        // If the propsing value is accepted then this will forever be the proposing value.
+        // If a value is received from a failed promise/accept then all subsequent promise/accept will contain this new value
 
-        // then once I have good promises back
+        // I don't know what to do about the promise accept for each
+        // I'm thinking i have them all in the fused futures and then keep popping the newest
+        // If accept passed great.  If not create another promise then accept phase for that 
+        // Could probably encode that as an enum for the type state pattern
 
-        // Send out the accept to all of the acceptors
-        // The accepted value is once I get a majority of accept repsones with the same accepted value
+        // Then once a majority of acceptors has accepted a single value that's our answer and keep propegating that
+        // 
+
         let mut accepted_count = 0;
         // this is the error with main
         for acceptor_id in acceptor_identifiers.iter() {
