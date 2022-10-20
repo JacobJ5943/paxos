@@ -1,3 +1,4 @@
+use acceptors::{AcceptedValue, HighestBallotPromised};
 use async_trait::async_trait;
 use serde::{Serialize, Deserialize};
 
@@ -19,7 +20,7 @@ pub struct PromiseReturn {
 /// 
 pub trait SendToAcceptors {
 
-    async fn send_accept(&self, acceptor_identifier:usize, value:usize, ballot_num:usize, proposer_identifier:usize) -> Result<(),()>;
+    async fn send_accept(&self, acceptor_identifier:usize, value:usize, ballot_num:usize, proposer_identifier:usize) -> Result<AcceptedValue, HighestBallotPromised>;
     async fn send_promise(&self, acceptor_identifier:usize, ballot_num:usize, proposer_identifier:usize)-> Result<(), PromiseReturn>;
 }
 

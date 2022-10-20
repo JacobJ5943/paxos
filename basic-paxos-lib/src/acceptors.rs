@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use tracing::{info, instrument};
 
 use crate::PromiseReturn;
@@ -22,10 +23,22 @@ impl Default for Acceptor {
     }
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+pub struct AcceptedValue(pub usize);
+
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct HighestBallotPromised(pub Option<usize>);
+
+
+
 impl Acceptor {
     /// .
     ///
     /// I don't know what to do with the errors for this function
+    /// 
+    /// This function I am going to have return the value that's accepted on Ok or that value of the current highest ballot number
+    /// This may be the same as the propsed ballot num.  If that's the case it's because it was promised to a different proposer
     ///
     /// # Errors
     ///
@@ -44,8 +57,12 @@ impl Acceptor {
         ballot_num: usize,
         node_identifier: usize,
         value: usize,
-    ) -> Result<(), ()> {
+    ) -> Result<AcceptedValue, HighestBallotPromised> {
         info!("received accept request");
+        if let Some(accepted_value) = self.accepted_value {
+            return Ok(AcceptedValue(accepted_value))
+        };
+
         match self.promised_ballot_num {
             Some(promised_ballot_num) => {
                 // Should ballot_num be == or >= ?
@@ -56,21 +73,21 @@ impl Acceptor {
                         // I might want to just reject Some(_) entirely
                         Some(already_accepted_value) => {
                             if already_accepted_value == value {
-                                Ok(())
+                                Ok(AcceptedValue(already_accepted_value))
                             } else {
-                                Err(())
+                                Err(HighestBallotPromised(Some(promised_ballot_num)))
                             }
                         }
                         None => {
                             self.accepted_value = Some(value);
-                            Ok(())
+                            Ok(AcceptedValue(value))
                         }
                     }
                 } else {
-                    Err(())
+                    Err(HighestBallotPromised(Some(promised_ballot_num)))
                 }
             }
-            None => Err(()), // No promise has been received so there shouldn't be an accept
+            None => Err(HighestBallotPromised(None)), // No promise has been received so there shouldn't be an accept
         }
     }
 

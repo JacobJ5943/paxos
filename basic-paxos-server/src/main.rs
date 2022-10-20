@@ -1,6 +1,6 @@
-use std::{
-    borrow::Borrow, collections::HashMap, convert::Infallible, net::SocketAddr, sync::Arc,
-};
+use std::{borrow::Borrow, collections::HashMap, convert::Infallible, net::SocketAddr, sync::Arc};
+use basic_paxos_lib::acceptors::AcceptedValue;
+use basic_paxos_lib::acceptors::HighestBallotPromised;
 
 use async_trait::async_trait;
 use axum::{
@@ -12,12 +12,12 @@ use axum::{
     Extension, Router,
 };
 use axum_macros::debug_handler;
-use basic_paxos_lib::{PromiseReturn, acceptors::Acceptor, proposers::Proposer};
+use basic_paxos_lib::{acceptors::Acceptor, proposers::Proposer, PromiseReturn};
 use clap::{command, value_parser, Arg, ArgAction};
 use hyper::{Body, Request, StatusCode};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{RwLock, Mutex};
-use tracing::{Level, instrument, info};
+use tokio::sync::{Mutex, RwLock};
+use tracing::{info, instrument, Level};
 
 use crate::gui::run_gui;
 
@@ -44,10 +44,14 @@ fn get_matches() -> clap::ArgMatches {
         .get_matches()
 }
 
-async fn run_tokio_things(local_acceptor:Arc<Mutex<Acceptor>>, shared_state:Arc<Mutex<SharedState>>, acceptor_network_vec:Arc<RwLock<Vec<AcceptorNetworkStruct>>>, local_proposer:Arc<Mutex<Proposer>>, sender_client: Arc<SendToForwardServer>, my_port:u16) -> Result<(), ()> {
-
-
-
+async fn run_tokio_things(
+    local_acceptor: Arc<Mutex<Acceptor>>,
+    shared_state: Arc<Mutex<SharedState>>,
+    acceptor_network_vec: Arc<RwLock<Vec<AcceptorNetworkStruct>>>,
+    local_proposer: Arc<Mutex<Proposer>>,
+    sender_client: Arc<SendToForwardServer>,
+    my_port: u16,
+) -> Result<(), ()> {
     let app = Router::new()
         .route("/accept", post(accept))
         .layer(Extension(local_acceptor.clone()))
@@ -59,38 +63,29 @@ async fn run_tokio_things(local_acceptor:Arc<Mutex<Acceptor>>, shared_state:Arc<
         .route("/promise", post(receive_promise))
         .layer(Extension(local_acceptor));
 
-
     let addr = SocketAddr::from(([127, 0, 0, 1], my_port));
 
     let server_join_handle = axum::Server::bind(&addr)
-        .serve(app.into_make_service()).await;
-
+        .serve(app.into_make_service())
+        .await;
 
     println!("What the fuck");
 
     Ok(())
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>>{
-
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = get_matches();
     println!("Hello, world!");
 
-
-
-
-
     let subscriber = tracing_subscriber::FmtSubscriber::builder()
-    // all spans/events with a level higher than TRACE (e.g, debug, info, warn, etc.)
-    // will be written to stdout.
-    .with_max_level(Level::INFO)
-    // builds the subscriber.
-    .finish();
+        // all spans/events with a level higher than TRACE (e.g, debug, info, warn, etc.)
+        // will be written to stdout.
+        .with_max_level(Level::INFO)
+        // builds the subscriber.
+        .finish();
 
     tracing::subscriber::set_global_default(subscriber).unwrap();
-
-
-
 
     let my_port = *args.get_one::<u16>("MyPort").unwrap();
     let shared_state = Arc::new(Mutex::new(SharedState {}));
@@ -124,28 +119,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>>{
         acceptors: forward_do_hickie,
     });
 
-
     let prop_clone = local_proposer.clone();
     let acpt_clone = shared_acceptor.clone();
     let tokio_runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
     //let gui_join_handle = tokio::spawn(async {
-        //gui::run_gui(prop_clone,acpt_clone).await;
+    //gui::run_gui(prop_clone,acpt_clone).await;
     //});
 
-
     let tokio_runtime_cloned = tokio_runtime.clone();
-    let tokio_join_handle = std::thread::spawn(move ||{
-        tokio_runtime.block_on(run_tokio_things( shared_acceptor, shared_state, acceptor_network_vec, local_proposer, sender_client, my_port))
+    let tokio_join_handle = std::thread::spawn(move || {
+        tokio_runtime.block_on(run_tokio_things(
+            shared_acceptor,
+            shared_state,
+            acceptor_network_vec,
+            local_proposer,
+            sender_client,
+            my_port,
+        ))
     });
-
 
     let result = run_gui(tokio_runtime_cloned, prop_clone, acpt_clone);
 
     println!("This should go through");
 
     //let tokio_result = tokio_join_handle.join();
-
-
 
     Ok(())
 }
@@ -156,6 +153,17 @@ struct AcceptRequestBody {
     node_identifier: usize,
     value: usize,
 }
+
+#[derive(Debug,Serialize,Deserialize)]
+struct AcceptedValueWrapper {
+    accepted_value:AcceptedValue
+}
+
+#[derive(Debug,Serialize,Deserialize)]
+struct HighestBallotPromisedWrapper {
+    highest_ballot_promised:HighestBallotPromised
+}
+
 /// This is what the acceptors will receive accept requests on
 /// This will need to have access to the acceptors, but doesn't need access to anything else
 /// TODO The return type should probably not be that
@@ -164,7 +172,7 @@ struct AcceptRequestBody {
 async fn accept(
     acceptor_state: Extension<Arc<Mutex<basic_paxos_lib::acceptors::Acceptor>>>,
     Json(request_body): extract::Json<AcceptRequestBody>,
-) -> Json<Result<(), ()>> {
+) -> Json<Result<AcceptedValue, HighestBallotPromised>> {
     info!("accepting_value");
     let mut lock = acceptor_state.lock().await;
     let result = lock.accept(
@@ -172,8 +180,9 @@ async fn accept(
         request_body.node_identifier,
         request_body.value,
     );
-    dbg!("fuck yeah we finished accepting with result {}", result);
-    Json(result)
+    
+    dbg!("fuck yeah we finished accepting with result {}", &result);
+    dbg!(Json(result))
 }
 
 #[derive(Deserialize, Debug)]
@@ -245,12 +254,11 @@ async fn receive_promise(
         "fuck yeah we finished processing the promise with result {}",
         &result
     );
-    
+
     Json(result.map_err(|err| dbg!(dbg!(PromiseReturnWrapper(err)))))
 }
 
-#[derive(Debug)]
-#[derive(Serialize, Deserialize)] // These should be behind a featuer flag probably
+#[derive(Debug, Serialize, Deserialize)] // These should be behind a featuer flag probably
 struct PromiseReturnWrapper(basic_paxos_lib::PromiseReturn);
 
 impl IntoResponse for PromiseReturnWrapper {
@@ -310,7 +318,7 @@ impl basic_paxos_lib::SendToAcceptors for &SendToForwardServer {
         value: usize,
         ballot_num: usize,
         proposer_identifier: usize,
-    ) -> Result<(), ()> {
+    ) -> Result<AcceptedValue, HighestBallotPromised> {
         info!("sending_accept");
         let forwarding_port = FORWARDING_PORT;
 
@@ -336,23 +344,19 @@ impl basic_paxos_lib::SendToAcceptors for &SendToForwardServer {
             .method("POST")
             .body(Body::from(request_body))
             .unwrap();
-        let (parts, body) = request.into_parts();
+        let (parts, body) = dbg!(request.into_parts());
         let request = Request::from_parts(parts, body);
 
         let client = hyper::Client::new();
         let response: hyper::Response<Body> = client.request(request).await.unwrap();
+        dbg!(&response);
 
         // Currently the accept function only returns a result
         let (parts, body): (_, Body) = response.into_parts();
-        let result:Result<(),()> = dbg!(serde_json::from_slice(&hyper::body::to_bytes(body).await.unwrap()).unwrap());
-
-        // I really need a way to encode a Result<(),()>
-        if let StatusCode::OK = parts.status {
-            Ok(())
-        } else {
-            Err(())
+        dbg!("parts->{:?}", parts);
+        let result = dbg!(serde_json::from_slice::<Result<AcceptedValue, HighestBallotPromised>>(&hyper::body::to_bytes(body).await.unwrap()).unwrap());
+            result
         }
-    }
 
     #[instrument]
     async fn send_promise(
@@ -386,7 +390,7 @@ impl basic_paxos_lib::SendToAcceptors for &SendToForwardServer {
             .method("POST")
             .body(Body::from(request_body))
             .unwrap();
-        let (parts, body) = request.into_parts();
+        let (parts, body) = dbg!(request.into_parts());
         let request = Request::from_parts(parts, body);
 
         let client = hyper::Client::new();
@@ -396,9 +400,7 @@ impl basic_paxos_lib::SendToAcceptors for &SendToForwardServer {
 
         // Currently the accept function only returns a result
         let (parts, body): (_, Body) = response.into_parts();
-        let body = dbg!(hyper::body::to_bytes(body)
-            .await)
-            .unwrap_or_else(|_| todo!());
+        let body = dbg!(hyper::body::to_bytes(body).await).unwrap_or_else(|_| todo!());
 
         if parts.status == StatusCode::OK && body.len() == 0 {
             Ok(())
@@ -412,3 +414,5 @@ impl basic_paxos_lib::SendToAcceptors for &SendToForwardServer {
         }
     }
 }
+
+
