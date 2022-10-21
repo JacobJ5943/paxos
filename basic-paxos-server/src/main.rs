@@ -340,6 +340,7 @@ impl basic_paxos_lib::SendToAcceptors for &SendToForwardServer {
                     .unwrap()
                     .to_string(),
             )
+            .header("node-identifier", proposer_identifier)
             .header("content-type", "application/json")
             .method("POST")
             .body(Body::from(request_body))

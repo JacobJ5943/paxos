@@ -9,6 +9,7 @@ use crate::{
     PromiseReturn, SendToAcceptors,
 };
 
+
 #[derive(Debug)]
 pub struct Proposer {
     pub current_highest_ballot: usize,
@@ -22,9 +23,12 @@ impl Proposer {
 
     /// .
     /// TODO acceptors should not be this.
+    /// 
+    /// TODO The return type for if it was already accepted should not be if the value is different
     /// # Errors
     ///
     /// This function will return an error if there is already an accepted value.  The value of the error will be that accepted value.
+    /// 
     #[instrument(skip(send_to_acceptors))]
     pub async fn propose_value(
         &mut self,
@@ -38,6 +42,7 @@ impl Proposer {
         // This is mut for the case where an acceptor has already accepted a value
         let mut proposing_value = initial_proposed_value;
         let mut a_value_has_been_accepted = false; // This should really be propsing_value as an option or something
+        let mut accepted_results: HashMap<usize, usize> = HashMap::new();
 
 
 
@@ -66,77 +71,61 @@ impl Proposer {
 
         // Keep pulling from futures_unsorted until I have a majority of responses.
         // From what I remember I need to wait for a majority of responses before I do some processing
-        for _ in 0..quarem {
+
+        let mut accepted_promises = 0;
+
+        // TODO clean this up so I don't have as many varaibles hanging around
+        let mut found_value = None;
+        let mut highest_found_ballot_with_value = 0;
+        while accepted_promises < quarem {
+            if promise_futures_unsorted.is_empty() {
+                // This is the case where there is an already decided value
+                // What I need to do is start that accepted hashmap right away
+                // and then always have that condition on the quarem deciding the value1
+                unimplemented!("This is the case where there is an already decided value.  This is also the case where I would need to keep propegating the value to the others.  Or not")
+            }
             let result = promise_futures_unsorted.select_next_some().await;
-            results_returned.push(result);
-        }
-
-        // Once I have a majority of responses I am going to take the value of the highest ballot num returned.
-        // I'm not sure if I need to take the value of a different one if the highest ballot num does not have a value.
-        // for now I am taking the highest ballot num as is
-        let working_ballot = results_returned
-            .iter()
-            .reduce(|acc, next| {
-                if acc.is_ok() {
-                    next
-                } else {
-                    match (acc, next) {
-                        (Err((_, acc_promise_return)), Ok(_)) => acc,
-                        (Err((_, acc_promise_return)), Err((_, next_promise_return))) => {
-                            if (next_promise_return.highest_ballot_num
-                                > acc_promise_return.highest_ballot_num)
-                                || (next_promise_return.highest_ballot_num
-                                    == acc_promise_return.highest_ballot_num
-                                    && next_promise_return.highest_node_identifier
-                                        > acc_promise_return.highest_node_identifier)
-                            {
-                                next
-                            } else {
-                                acc
-                            }
-                        }
-                        (_, _) => {
-                            // Acc is not ok
-                            unreachable!()
-                        }
-                    }
-                }
-            })
-            .unwrap(); // quarem must be greater than 0 as such there must be greater than 0 items in results_returned
-
-        // take the highest ballot num.  If it has a value then set the propsing value to that
-        match working_ballot {
-            Ok(_awaiting_accept) => { // This means we are good to go
-            }
-            Err((_awaiting_promise, promise_return)) => {
-                // Now the accepts should pass.
-                // This is where more promises may need to be sent with this ballot number
-                self.current_highest_ballot = promise_return.highest_ballot_num + 1;
-                if let Some(accepted_value) = promise_return.accepted_value {
-                    proposing_value = accepted_value;
-                    a_value_has_been_accepted = true;
-                }
-            }
-        };
-
-        for awaiting_result in results_returned.into_iter() {
-            match awaiting_result {
-                Ok(awaiting_accept) => {
-                    accept_futures_unsorted.push(awaiting_accept.send_accept(
-                        proposing_value,
-                        self.current_highest_ballot,
-                        self.node_identifier,
-                        send_to_acceptors
-                    ));
-                }
+            match result {
+                Ok(ahh) => {results_returned.push(ahh);accepted_promises +=1;},
                 Err((awaiting_promise, promise_return)) => {
-                    promise_futures_unsorted.push(
-                        awaiting_promise
-                            .send_promise(self.current_highest_ballot, self.node_identifier, send_to_acceptors),
-                    );
-                }
-            }
+                    self.current_highest_ballot = self.current_highest_ballot.max(promise_return.highest_ballot_num + 1);// if self.current_highest_ballot is the greater than it will be fine for the next promise to that acceptor
+
+                    if promise_return.accepted_value.is_some() {
+                        a_value_has_been_accepted = true;
+                        if promise_return.highest_ballot_num > highest_found_ballot_with_value {
+                            found_value = promise_return.accepted_value;
+                            highest_found_ballot_with_value = promise_return.highest_ballot_num;
+                        }
+
+                        // Now insert into the hashamp.  Ordering is weird here and I don't this is correct anyway
+                            match accepted_results.entry(promise_return.accepted_value.unwrap()) {
+                                std::collections::hash_map::Entry::Occupied(mut oc) => {*oc.into_mut() +=1;},
+                                std::collections::hash_map::Entry::Vacant(mut vac) => {vac.insert(1);},
+                            }
+
+                            if accepted_results.get(&promise_return.accepted_value.unwrap()).unwrap() >= &quarem {
+                                return Err(promise_return.accepted_value.unwrap());
+
+                            }
+                    } else {
+                        promise_futures_unsorted.push(awaiting_promise.send_promise(self.current_highest_ballot, self.node_identifier, send_to_acceptors));
+                    }
+
+                },
+}
+
         }
+
+
+        if found_value.is_some() {
+            proposing_value = found_value.unwrap();
+        }
+
+        assert_eq!(results_returned.len(), quarem, "this really is an uncessisary check.  look into debug asserts");
+        for awaiting_accept in results_returned.into_iter() {
+            accept_futures_unsorted.push(awaiting_accept.send_accept(proposing_value, self.current_highest_ballot, self.node_identifier, send_to_acceptors))
+        }
+        
 
         // If the there was not a value we will keep trying the proposing value.
         // If the propsing value is accepted then this will forever be the proposing value.
@@ -153,7 +142,6 @@ impl Proposer {
         let mut accepted_count = 0;
 
         // <AccpetedValue, count>
-        let mut accepted_results: HashMap<usize, usize> = HashMap::new();
 
         let mut decided_value: Option<usize> = None;
 
