@@ -63,11 +63,15 @@ impl Acceptor {
             return Ok(AcceptedValue(accepted_value))
         };
 
+        // I think I need to chage this to be 
+        // if promsied_ballot number is greater then accept if haven't already
+        // if promised_ballot is the same then check the node identifier for a tie, but only if it's the same
+        // if lower reject
+
         match self.promised_ballot_num {
             Some(promised_ballot_num) => {
                 // Should ballot_num be == or >= ?
-                if ballot_num >= promised_ballot_num
-                    && node_identifier == self.promised_node_identifier
+                if (ballot_num > promised_ballot_num) || (promised_ballot_num == ballot_num && self.promised_node_identifier == node_identifier)
                 {
                     match self.accepted_value {
                         // I might want to just reject Some(_) entirely
@@ -226,6 +230,7 @@ mod acc_tests {
         );
 
         let accept_response = acceptor.accept(8, 1, 9);
-        assert!(accept_response.is_err());
+        assert!(accept_response.is_ok());
+        assert!(accept_response.unwrap().0 != 9)
     }
 }
