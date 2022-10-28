@@ -1,6 +1,6 @@
-use std::{borrow::Borrow, collections::HashMap, convert::Infallible, net::SocketAddr, sync::Arc};
 use basic_paxos_lib::acceptors::AcceptedValue;
 use basic_paxos_lib::acceptors::HighestBallotPromised;
+use std::{borrow::Borrow, collections::HashMap, convert::Infallible, net::SocketAddr, sync::Arc};
 
 use async_trait::async_trait;
 use axum::{
@@ -154,14 +154,14 @@ struct AcceptRequestBody {
     value: usize,
 }
 
-#[derive(Debug,Serialize,Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct AcceptedValueWrapper {
-    accepted_value:AcceptedValue
+    accepted_value: AcceptedValue,
 }
 
-#[derive(Debug,Serialize,Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct HighestBallotPromisedWrapper {
-    highest_ballot_promised:HighestBallotPromised
+    highest_ballot_promised: HighestBallotPromised,
 }
 
 /// This is what the acceptors will receive accept requests on
@@ -180,7 +180,7 @@ async fn accept(
         request_body.node_identifier,
         request_body.value,
     );
-    
+
     dbg!("fuck yeah we finished accepting with result {}", &result);
     dbg!(Json(result))
 }
@@ -244,7 +244,7 @@ struct PromiseRequest {
 async fn receive_promise(
     acceptor_state: Extension<Arc<Mutex<basic_paxos_lib::acceptors::Acceptor>>>,
     Json(request_body): extract::Json<PromiseRequest>,
-) -> Json<Result<(), PromiseReturnWrapper>> {
+) -> Json<Result<Option<AcceptedValue>, PromiseReturnWrapper>> {
     info!("recieing_promise");
     let result = acceptor_state
         .lock()
@@ -355,9 +355,14 @@ impl basic_paxos_lib::SendToAcceptors for &SendToForwardServer {
         // Currently the accept function only returns a result
         let (parts, body): (_, Body) = response.into_parts();
         dbg!("parts->{:?}", parts);
-        let result = dbg!(serde_json::from_slice::<Result<AcceptedValue, HighestBallotPromised>>(&hyper::body::to_bytes(body).await.unwrap()).unwrap());
-            result
-        }
+        let result = dbg!(
+            serde_json::from_slice::<Result<AcceptedValue, HighestBallotPromised>>(
+                &hyper::body::to_bytes(body).await.unwrap()
+            )
+            .unwrap()
+        );
+        result
+    }
 
     #[instrument]
     async fn send_promise(
@@ -365,7 +370,7 @@ impl basic_paxos_lib::SendToAcceptors for &SendToForwardServer {
         acceptor_identifier: usize,
         ballot_num: usize,
         proposer_identifier: usize,
-    ) -> Result<(), basic_paxos_lib::PromiseReturn> {
+    ) -> Result<Option<AcceptedValue>, basic_paxos_lib::PromiseReturn> {
         info!("sending promise");
         let forwarding_port = FORWARDING_PORT;
 
@@ -403,17 +408,10 @@ impl basic_paxos_lib::SendToAcceptors for &SendToForwardServer {
         let (parts, body): (_, Body) = response.into_parts();
         let body = dbg!(hyper::body::to_bytes(body).await).unwrap_or_else(|_| todo!());
 
-        if parts.status == StatusCode::OK && body.len() == 0 {
-            Ok(())
-        } else {
-            serde_json::from_slice::<Result<(), PromiseReturn>>(dbg!(&body)).unwrap_or_else(
-                |error| {
-                    dbg!(error);
-                    todo!()
-                },
-            )
-        }
+        serde_json::from_slice::<Result<Option<AcceptedValue>, PromiseReturn>>(dbg!(&body))
+            .unwrap_or_else(|error| {
+                dbg!(error);
+                todo!()
+            })
     }
 }
-
-

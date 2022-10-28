@@ -16,6 +16,7 @@ pub struct Proposer {
 }
 
 impl Proposer {
+    #[instrument(skip(send_to_acceptors))]
     async fn promise_quarem(
         &mut self,
         acceptor_identifiers: &mut Vec<usize>,
@@ -23,7 +24,7 @@ impl Proposer {
     ) -> Result<(), (HighestBallotPromised, Option<AcceptedValue>)> {
         let mut sending_promises = Vec::new();
 
-        self.current_highest_ballot += self.current_highest_ballot + 1;
+        self.current_highest_ballot = self.current_highest_ballot + 1;
         for acceptor_id in acceptor_identifiers.iter() {
             sending_promises.push(
                 AwaitingPromise {
@@ -50,52 +51,53 @@ impl Proposer {
             results.push(new_result);
         }
 
-        let what_i_want_result_type_to_be = results
-            .into_iter()
-            .map(|result| result.map(|good_value| ()).map_err(|err| err.1))
-            .collect::<Vec<_>>();
-
         let mut highest_ballot_for_value: Option<usize> = None;
 
-        let mut working_promise: Result<(), PromiseReturn> = Ok(());
-        for result in what_i_want_result_type_to_be {
-            if working_promise.is_ok() {
-                working_promise = result;
-            } else {
-                match (result, &mut working_promise) {
-                    (Ok(_), _) => todo!(),
-                    (Err(result_promise_return), Err(working_promise_err)) => {
-                        if result_promise_return.highest_ballot_num
-                            > working_promise_err.highest_ballot_num
-                        {
-                            working_promise_err.highest_ballot_num =
-                                result_promise_return.highest_ballot_num;
-                        }
+        let mut working_promise: Option<PromiseReturn> = None;
+        for result in results.into_iter() {
+            match (result, &mut working_promise) {
+                (Ok(accepted_value), None) => {
+                    if let Some(accepted_value) = accepted_value {
+                        working_promise = Some(PromiseReturn {
+                            highest_ballot_num: self.current_highest_ballot,
+                            highest_node_identifier: self.node_identifier,
+                            accepted_value: Some(accepted_value).map(|av| av.0),
+                        });
+                    }
+                }
+                (Ok(accepted_value), Some(working_promise)) => {
+                    if working_promise.accepted_value.is_none() && accepted_value.is_some() {
+                        working_promise.accepted_value = accepted_value.map(|av| av.0);
+                    }
+                } // This is just a nop right?  because the promise was good?
+                (Err(result_promise_return), Some(working_promise)) => {
+                    if result_promise_return.highest_ballot_num > working_promise.highest_ballot_num
+                    {
+                        working_promise.highest_ballot_num =
+                            result_promise_return.highest_ballot_num;
+                    }
 
-                        if result_promise_return.accepted_value.is_some()
-                            && (highest_ballot_for_value.is_none()
-                                || result_promise_return.highest_ballot_num
-                                    > highest_ballot_for_value.unwrap())
-                        {
-                            highest_ballot_for_value =
-                                Some(result_promise_return.highest_ballot_num);
-                            working_promise_err.accepted_value =
-                                result_promise_return.accepted_value;
-                        }
+                    if result_promise_return.accepted_value.is_some()
+                        && (highest_ballot_for_value.is_none()
+                            || result_promise_return.highest_ballot_num
+                                > highest_ballot_for_value.unwrap())
+                    {
+                        highest_ballot_for_value = Some(result_promise_return.highest_ballot_num);
+                        working_promise.accepted_value = result_promise_return.accepted_value;
                     }
-                    (Err(_), Ok(_)) => {
-                        unreachable!("Maybe this will be apart of the match someday")
-                    }
+                }
+                (Err(result_promise_return), None) => {
+                    working_promise = Some(result_promise_return);
                 }
             }
         }
 
         match working_promise {
-            Ok(_) => {
+            None => {
                 // There has not been a decided value and we're good to go
                 Ok(())
             }
-            Err(working_promise_err) => {
+            Some(working_promise_err) => {
                 // This is so gosh darn verbose gross
                 Err((
                     HighestBallotPromised(Some(working_promise_err.highest_ballot_num)),
@@ -117,6 +119,7 @@ impl Proposer {
      * Ok(decided_value)
      * Err(I'll decide what to do with retries later.  This stuff is complicated)
      */
+    #[instrument(skip(send_to_acceptors))]
     async fn accept_quarem(
         &mut self,
         proposing_value: usize,
@@ -193,7 +196,6 @@ impl Proposer {
     ///
     /// This function will return an error if there is already an accepted value.  The value of the error will be that accepted value.
     ///
-    #[instrument(skip(send_to_acceptors))]
     pub async fn propose_value(
         &mut self,
         initial_proposed_value: usize,
@@ -210,71 +212,56 @@ impl Proposer {
 
         let workign_promise_response: Option<PromiseReturn> = None;
 
-        let propose_querm_result = self
-            .promise_quarem(acceptor_identifiers, send_to_acceptors)
-            .await;
+        let mut decided_value = Err(());
 
-        match propose_querm_result {
-            Ok(_) => (), // Can move on just fine
-            Err((highest_ballot, accepted_value)) => {
+        while let Err(_) = decided_value {
+            info!("Starting promise while loop.");
+            while let Err((highest_ballot, accepted_value)) = dbg!(
+                self.promise_quarem(acceptor_identifiers, send_to_acceptors)
+                    .await
+            ) {
                 // Let's go more comment streams
                 /*
                  * Here I have a choice
                  * I can either try again with promises or I can chug along with the accepts
                  * Since I don't know how to even decide what do with previous accepted values I'm just going to chug along with the highest_ballot_num + 1 and accepted_value
                  */
+                if self.current_highest_ballot >= highest_ballot.0.unwrap() {
+                    if let Some(accepted_value) = &accepted_value {
+                        if proposing_value == accepted_value.0 {
+                            break;
+                        }
+                    }
+                }
 
+                info!(
+                    "Result of promise_qurem {:?},{:?}",
+                    highest_ballot, accepted_value
+                );
+                dbg!(format!(
+                    "Result of promise_qurem {:?},{:?}",
+                    highest_ballot, accepted_value
+                ));
                 self.current_highest_ballot = highest_ballot.0.unwrap() + 1; // there will be a highest ballot if there was an error
                 if let Some(accepted_value) = accepted_value {
                     proposing_value = accepted_value.0;
                 }
-
-                /*
-                 * What do I want from an errored promise?
-                 * I want to know
-                 * 1. has a different value been proposed
-                 * 2. What is the ballot number I should use?
-                 *
-                 * For 1. Do I care if there has been a majority?  If yes then I can stop as the value has been decided.  Though we need to still send the accepts to propegate this to all acceptors?
-                 * Let's go with not caring if it's been decided
-                 *
-                 * I don't think I need to care
-                 * THis is because if a value has been decided then it will be the accepted value with the highest ballot number
-                 * this is because for an accept to succeed it must first have a promise.  This promise needs to have been accepted by a querem of acceptors.
-                 *
-                 * Shoot I lost my train of thought.  I wrote out what convinced me on paper
-                 * TODO why is the highest ballot number with an accepted value the deicded value?  I think it has to do with a quarem of promises guarenteeing that it will
-                 *
-                 *
-                 * But then the question is when to stop and send the accepts
-                 * I guess I just need a quarem of responses right?A
-                 *
-                 *
-                 *
-                 * I guess accept neesd to respond back with a state
-                 * so like accepted the ballot number isn't that important past being the highest
-                 *
-                 *  once I get quarem of either okay promise or accepted then send accepts to all
-                 *
-                 *
-                 */
             }
+
+            let quarem = ((acceptor_identifiers.len() as f64 / 2.0).floor()) as usize + 1;
+            // Now I need to send out accept to everyone
+            decided_value = self
+                .accept_quarem(
+                    proposing_value,
+                    acceptor_identifiers,
+                    send_to_acceptors,
+                    quarem,
+                )
+                .await;
+            info!("Decided value for this loop is {:?}", decided_value);
         }
 
-        let quarem = ((acceptor_identifiers.len() as f64 / 2.0).floor()) as usize + 1;
-        // Now I need to send out accept to everyone
-        let decided_value = self
-            .accept_quarem(
-                proposing_value,
-                acceptor_identifiers,
-                send_to_acceptors,
-                quarem,
-            )
-            .await;
-
-        if decided_value.is_err() {
-            unimplemented!("I'll get to this eventually.  This was when ther was an error from accept_quarem probably from network errors or something that I didn't implement")
-        }
+        assert!(decided_value.is_ok());
         if decided_value.unwrap() != initial_proposed_value {
             Err(proposing_value)
         } else {
@@ -293,6 +280,12 @@ impl Proposer {
 #[cfg(test)]
 mod prop_tests {
 
+    /*
+     * TODO Add mutexes to control the flow of traffic
+     *
+     * I want to be able to emulate my man in the middle crate with mutexes or some other sync mechanism
+     * This will allow me to write much more complex tests
+     */
     struct LocalSendToAcceptor {
         acceptors: Arc<Mutex<Vec<Acceptor>>>,
     }
@@ -323,7 +316,7 @@ mod prop_tests {
             acceptor_identifier: usize,
             ballot_num: usize,
             proposer_identifer: usize,
-        ) -> Result<(), PromiseReturn> {
+        ) -> Result<Option<AcceptedValue>, PromiseReturn> {
             self.acceptors.lock().unwrap()[acceptor_identifier]
                 .promise(ballot_num, proposer_identifer)
         }
@@ -487,16 +480,14 @@ impl AwaitingPromise {
         ballot_num: usize,
         proposer_identifier: usize,
         send_to_acceptors: &impl SendToAcceptors,
-    ) -> Result<AwaitingAccept, (AwaitingPromise, PromiseReturn)> {
+    ) -> Result<Option<AcceptedValue>, PromiseReturn> {
         let result = send_to_acceptors
             .send_promise(self.acceptor_id, ballot_num, proposer_identifier)
             .await;
 
         match result {
-            Ok(_) => Ok(AwaitingAccept {
-                acceptor_id: self.acceptor_id,
-            }),
-            Err(promise_return) => Err((self, promise_return)),
+            Ok(accepted_value) => Ok(accepted_value),
+            Err(promise_return) => Err(promise_return),
         }
     }
 }
