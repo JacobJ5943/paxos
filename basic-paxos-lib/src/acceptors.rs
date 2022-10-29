@@ -30,24 +30,18 @@ pub struct AcceptedValue(pub usize);
 pub struct HighestBallotPromised(pub Option<usize>);
 
 impl Acceptor {
-    /// .
+    /// This is how an acceptor receives accept requests.
     ///
-    /// I don't know what to do with the errors for this function
+    /// Returns Ok of the value Accepted by this acceptor if the ballot number is greater than or equal to what the acceptor has promised.
     ///
-    /// This function I am going to have return the value that's accepted on Ok or that value of the current highest ballot number
-    /// This may be the same as the propsed ballot num.  If that's the case it's because it was promised to a different proposer
+    /// If the Acceptor had not accepted a value then if successful the value returned will match the value of the request.
     ///
     /// # Errors
     ///
     /// Should error if
-    /// 1. Not the right producer (ballot_num and node_identifier don't match fully)
-    /// 2. This acceptor has now promised a higher ballot_num (pretty much same as 1)
-    /// 3. This acceptor has already accepted a value (This is the case I don't have distinguished yet).
-    ///     if producers are following protocol this should have been caught in 2, but we can't tell the difference from that.
-    ///     Distinguishing it is only an optimization though as the producer will have to call promise again, in which case if there was a majority value it would learn it.
+    /// 1. the self.promised_ballot_num is > ballot_num
+    /// 2. if self.promised_ballot_num is >= ballot_num but the node_identifier is less than the promised node identifier
     ///
-    ///
-    /// This function will return an error if .
     #[instrument]
     pub fn accept(
         &mut self,
@@ -59,11 +53,6 @@ impl Acceptor {
         if let Some(accepted_value) = self.accepted_value {
             return Ok(AcceptedValue(accepted_value));
         };
-
-        // I think I need to chage this to be
-        // if promsied_ballot number is greater then accept if haven't already
-        // if promised_ballot is the same then check the node identifier for a tie, but only if it's the same
-        // if lower reject
 
         match self.promised_ballot_num {
             Some(promised_ballot_num) => {
@@ -88,19 +77,16 @@ impl Acceptor {
         }
     }
 
-    /// .
-    /// Will return Ok(AcceptedValue) if this acceptor has accepeted a value and the ballot is greater than or equal to the current promsied ballot
-    /// The reason for the AcceptedValue is so that when a proposer is proposing another value if the ballot number is higher it will know to still grab the new value
+    /// This is how an acceptor receives promise requests.
+    /// Will return Ok if the ballot_num is greater than the ballot_num already promised by this acceptor.
+    /// If they are the same the node identifier breaks the tie
     ///
-    ///  if this acceptor has not accepted a value and has not promised a ballot num with a higher value.  node_identifier is used to break ties
+    /// This Ok response will contain the accepted value by this acceptor if it has already accepted a value.
     ///
-    /// # Panics
     ///
     /// # Errors
     ///
-    /// The error contains the PromiseReturn type.  
-    /// If this contains a value it's up to the producer to then send out a subsequent accept with this value
-    /// If not the producer only needs to update their ballot num and then promise a higher value.
+    /// This function will return an error if the ballot_num is less than the ballot num already promised by this acceptor.
     pub fn promise(
         &mut self,
         ballot_num: usize,
@@ -119,7 +105,7 @@ impl Acceptor {
         if ballot_num >= promised_ballot_num {
             dbg!("that ballot be higher");
             match self.accepted_value {
-                Some(accepted_value) => Ok(self.accepted_value.map(AcceptedValue)), // Do I need to update my promsied ballot num?  This would be for a correctness reason if so
+                Some(_accepted_value) => Ok(self.accepted_value.map(AcceptedValue)), // Do I need to update my promised ballot num?  This would be for a correctness reason if so
                 None => {
                     self.promised_ballot_num = dbg!(Some(ballot_num));
                     self.promised_node_identifier = node_identifier;
@@ -129,7 +115,7 @@ impl Acceptor {
         } else if ballot_num == promised_ballot_num {
             if node_identifier > self.promised_node_identifier {
                 match self.accepted_value {
-                    Some(accepted_value) => Ok(self.accepted_value.map(AcceptedValue)), // Do I need to update my promsied ballot num?  This would be for a correctness reason if so
+                    Some(_accepted_value) => Ok(self.accepted_value.map(AcceptedValue)), // Do I need to update my promised ballot num?  This would be for a correctness reason if so
                     None => {
                         self.promised_ballot_num = Some(ballot_num);
                         self.promised_node_identifier = node_identifier;

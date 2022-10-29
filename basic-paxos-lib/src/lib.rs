@@ -14,8 +14,9 @@ pub struct PromiseReturn {
 }
 
 #[async_trait]
-/// DO I want this to send to all acceptors or just one?
+/// The trait that is used to control how messages are sent to acceptors.
 ///
+/// This is useful to have for supporting both fully local as well as network communication
 pub trait SendToAcceptors {
     async fn send_accept(
         &self,

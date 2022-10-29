@@ -16,8 +16,21 @@ pub struct Proposer {
 }
 
 impl Proposer {
+    /// .
+    /// Sends the propose message to all acceptors specified by send_to_acceptors.
+    /// Returns Ok if all promises returned Ok(None)
+    ///
+    /// Else Returns Err with the highest ballot number of all responses and the AcceptedValue with the highest matching ballot num.
+    ///
+    ///
+    /// # Errors
+    /// Returns
+    /// 1. The highest ballot number out of all the responses received
+    /// 2. The AcceptedValue which corresponds the highest ballot num of all the received responses that contain a AcceptedValue.
+    ///
+    /// This function will return an error if .
     #[instrument(skip(send_to_acceptors))]
-    async fn promise_quarem(
+    async fn promise_quorum(
         &mut self,
         acceptor_identifiers: &mut Vec<usize>,
         send_to_acceptors: &impl SendToAcceptors,
@@ -41,12 +54,12 @@ impl Proposer {
         let mut promise_futures_unsorted =
             futures::stream::FuturesUnordered::from_iter(sending_promises.into_iter());
 
-        // Get the first quarem results
+        // Get the first quorum results
 
-        let quarem = ((acceptor_identifiers.len() as f64 / 2.0).floor()) as usize + 1;
+        let quorum = ((acceptor_identifiers.len() as f64 / 2.0).floor()) as usize + 1;
 
         let mut results = Vec::new();
-        while results.len() < quarem && !promise_futures_unsorted.is_empty() {
+        while results.len() < quorum && !promise_futures_unsorted.is_empty() {
             let new_result = promise_futures_unsorted.select_next_some().await;
             results.push(new_result);
         }
@@ -107,25 +120,19 @@ impl Proposer {
         }
     }
 
-    /*
-     * I'm not really sure when to finish this funciton
-     *
-     * What I'm going to do for now because I need to decide something is to send the accept to everyone
-     * Then process results until either a quarem is reached or all results have been processed
-     *
-     * I don't really know what happens when there are network failures
-     *
-     * here the result
-     * Ok(decided_value)
-     * Err(I'll decide what to do with retries later.  This stuff is complicated)
-     */
+    ///
+    /// Sends an accept message to all acceptors.  After a majority of acceptors have responded with a single value it is decided and Ok(<decided_value>) is returned.
+    /// If every acceptor has responded and a value has not been decided Err(()) is returned.  It's up to the caller to retry
+    ///
+    ///
+    /// Errors on case of no value decided
     #[instrument(skip(send_to_acceptors))]
-    async fn accept_quarem(
+    async fn accept_quorum(
         &mut self,
         proposing_value: usize,
         acceptor_identifiers: &mut Vec<usize>,
         send_to_acceptors: &impl SendToAcceptors,
-        quarem: usize,
+        quorum: usize,
     ) -> Result<usize, ()> {
         let mut sending_accepts = Vec::new();
         for acceptor_id in acceptor_identifiers.iter() {
@@ -163,7 +170,7 @@ impl Proposer {
                             vac.insert(1);
                         }
                     }
-                    if accepted_results.get(&value_accepted).unwrap() >= &quarem {
+                    if accepted_results.get(&value_accepted).unwrap() >= &quorum {
                         //return Ok(value_accepted);// figure out short circuiting later
                         // There was a test that requires all 3/3 acceptors to have accepted.  Only 2/3 did with the short circuit so while decided still failed
                         decided_value = Some(value_accepted)
@@ -184,18 +191,17 @@ impl Proposer {
         }
     }
 
-    fn send_promise_messages() {}
-
-    fn send_accept_messages() {}
-
-    /// .
-    /// TODO acceptors should not be this.
     ///
-    /// TODO The return type for if it was already accepted should not be if the value is different
+    /// The function to propose a value.
+    ///
+    /// Returns Ok(()) if the proposed value is decided
+    /// Returns Err(<decided_value>) if some other value is decided
+    ///
+    /// Panics if .
+    ///
     /// # Errors
     ///
-    /// This function will return an error if there is already an accepted value.  The value of the error will be that accepted value.
-    ///
+    /// This function will return an error if .
     pub async fn propose_value(
         &mut self,
         initial_proposed_value: usize,
@@ -217,15 +223,11 @@ impl Proposer {
         while let Err(_) = decided_value {
             info!("Starting promise while loop.");
             while let Err((highest_ballot, accepted_value)) = dbg!(
-                self.promise_quarem(acceptor_identifiers, send_to_acceptors)
+                self.promise_quorum(acceptor_identifiers, send_to_acceptors)
                     .await
             ) {
-                // Let's go more comment streams
-                /*
-                 * Here I have a choice
-                 * I can either try again with promises or I can chug along with the accepts
-                 * Since I don't know how to even decide what do with previous accepted values I'm just going to chug along with the highest_ballot_num + 1 and accepted_value
-                 */
+                // Safety on unwrap
+                // a promise response will always have a highest ballot or else the promise would succeed
                 if self.current_highest_ballot >= highest_ballot.0.unwrap() {
                     if let Some(accepted_value) = &accepted_value {
                         if proposing_value == accepted_value.0 {
@@ -234,48 +236,42 @@ impl Proposer {
                     }
                 }
 
-                info!(
-                    "Result of promise_qurem {:?},{:?}",
-                    highest_ballot, accepted_value
-                );
-                dbg!(format!(
-                    "Result of promise_qurem {:?},{:?}",
-                    highest_ballot, accepted_value
-                ));
-                self.current_highest_ballot = highest_ballot.0.unwrap() + 1; // there will be a highest ballot if there was an error
+                // Safety on unwrap
+                // a promise response will always have a highest ballot or else the promise would succeed
+                self.current_highest_ballot = highest_ballot.0.unwrap() + 1;
                 if let Some(accepted_value) = accepted_value {
                     proposing_value = accepted_value.0;
                 }
             }
 
-            let quarem = ((acceptor_identifiers.len() as f64 / 2.0).floor()) as usize + 1;
-            // Now I need to send out accept to everyone
+            let quorum = ((acceptor_identifiers.len() as f64 / 2.0).floor()) as usize + 1;
+
             decided_value = self
-                .accept_quarem(
+                .accept_quorum(
                     proposing_value,
                     acceptor_identifiers,
                     send_to_acceptors,
-                    quarem,
+                    quorum,
                 )
                 .await;
             info!("Decided value for this loop is {:?}", decided_value);
         }
 
-        assert!(decided_value.is_ok());
-        if decided_value.unwrap() != initial_proposed_value {
-            Err(proposing_value)
-        } else {
-            Ok(())
+        match decided_value {
+            Ok(decided_value) => {
+                if decided_value != initial_proposed_value {
+                    Err(proposing_value)
+                } else {
+                    Ok(())
+                }
+            }
+            Err(_) => {
+                // This is the case because if a value is not decided the while let loop above will not exit
+                unreachable!()
+            }
         }
-
-        // I guess the big question is how do I handle situations where there is latency and responses don't come in at the same time
-        // or if there is contention
-        // Do I send out new promises to everyone with a new higher ballot?  Just that acceptor?  Do I update my ballot num and just keep using that and updating that.  Id on't think I will need to keep doing the same ballot nubmer for each acceptor
-        // Although I could just use the response from each acceptor and have a ballot number specific to each acceptor
     }
 }
-
-// Is that the right future type?
 
 #[cfg(test)]
 mod prop_tests {
@@ -315,10 +311,10 @@ mod prop_tests {
             &self,
             acceptor_identifier: usize,
             ballot_num: usize,
-            proposer_identifer: usize,
+            proposer_identifier: usize,
         ) -> Result<Option<AcceptedValue>, PromiseReturn> {
             self.acceptors.lock().unwrap()[acceptor_identifier]
-                .promise(ballot_num, proposer_identifer)
+                .promise(ballot_num, proposer_identifier)
         }
     }
 
@@ -381,7 +377,7 @@ mod prop_tests {
     }
 
     #[tokio::test]
-    // This test will never nhault because We won't have a quarem and so the prop_a_result will never resolve
+    // This test will never nhault because We won't have a quorum and so the prop_a_result will never resolve
     // i'm not sure how I will write this test
     async fn test_proposer_a_sends_2_to_two_then_proposer_b_sends_3_to_all_3() {
         let mut acceptors = vec![

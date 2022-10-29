@@ -8,18 +8,16 @@ pub fn run_gui(
     local_proposer: Arc<Mutex<basic_paxos_lib::proposers::Proposer>>,
     local_acceptor: Arc<Mutex<basic_paxos_lib::acceptors::Acceptor>>,
 ) {
-    println!("this went thorugh right?");
-
-    let (sender, reciever) = flume::bounded::<u8>(1);
-    let (acceptor_sendor, acceptor_receiver) = flume::bounded::<String>(1);
-    let (proposer_sendor, proposer_receiver) = flume::bounded::<String>(1);
+    let (sender, receiver) = flume::bounded::<u8>(1);
+    let (acceptor_sender, acceptor_receiver) = flume::bounded::<String>(1);
+    let (proposer_sender, proposer_receiver) = flume::bounded::<String>(1);
 
     let native_options = eframe::NativeOptions::default();
-    thread::spawn(move || {
+    thread::spawn(move || -> ! {
         let mut previous_proposer = "".to_string();
         let mut previous_acceptor = "".to_string();
         loop {
-            reciever.recv();
+            receiver.recv();
             let prop_sender_message = runtime.block_on(async {
                 tokio::time::timeout(
                     std::time::Duration::from_millis(1000),
@@ -29,13 +27,13 @@ pub fn run_gui(
                 .map(|lock_guard| format!("{:?}", lock_guard))
             });
             if let Ok(label) = prop_sender_message {
-                proposer_sendor.send(format!("{:?}", label.clone()));
+                proposer_sender.send(format!("{:?}", label.clone()));
                 previous_proposer = label;
             } else {
-                proposer_sendor.send(format!("{:?} -- Failed to update", previous_proposer));
+                proposer_sender.send(format!("{:?} -- Failed to update", previous_proposer));
             }
 
-            let aceptor_sender_message = runtime.block_on(async {
+            let acceptor_sender_message = runtime.block_on(async {
                 tokio::time::timeout(
                     std::time::Duration::from_millis(1000),
                     local_acceptor.lock(),
@@ -43,11 +41,11 @@ pub fn run_gui(
                 .await
                 .map(|lock_guard| format!("{:?}", lock_guard))
             });
-            if let Ok(label) = aceptor_sender_message {
-                acceptor_sendor.send(format!("{:?}", label.clone()));
+            if let Ok(label) = acceptor_sender_message {
+                acceptor_sender.send(format!("{:?}", label.clone()));
                 previous_acceptor = label;
             } else {
-                acceptor_sendor.send(format!("{:?} -- Failed to update", previous_acceptor));
+                acceptor_sender.send(format!("{:?} -- Failed to update", previous_acceptor));
             }
         }
     });
@@ -70,7 +68,7 @@ pub fn run_gui(
 struct MyEguiApp {
     local_proposer: Receiver<String>,
     local_acceptor: Receiver<String>,
-    updator: Sender<u8>,
+    updater: Sender<u8>,
 }
 
 impl MyEguiApp {
@@ -78,12 +76,12 @@ impl MyEguiApp {
         _cc: &eframe::CreationContext<'_>,
         local_proposer: Receiver<String>,
         local_acceptor: Receiver<String>,
-        updator: Sender<u8>,
+        updater: Sender<u8>,
     ) -> Self {
         Self {
             local_proposer,
             local_acceptor,
-            updator,
+            updater,
         }
     }
 }
@@ -92,17 +90,8 @@ impl eframe::App for MyEguiApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::Grid::new("test_id").show(ui, |ui| {
-                /*
-                for (index, value) in self.current_waiting_list.iter().enumerate() {
-                    if ui.button(format!("{}", value.0)).clicked() {
-                        remove_vec.push(index)
-                    }
-                    ui.end_row()
-                }
-                */
-                self.updator.send(0);
+                self.updater.send(0);
                 ui.button(self.local_proposer.recv().unwrap());
-                //ui.text_edit_multiline();
                 ui.end_row();
                 ui.button(self.local_acceptor.recv().unwrap());
                 ui.end_row();

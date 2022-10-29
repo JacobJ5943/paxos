@@ -46,7 +46,6 @@ fn get_matches() -> clap::ArgMatches {
 
 async fn run_tokio_things(
     local_acceptor: Arc<Mutex<Acceptor>>,
-    shared_state: Arc<Mutex<SharedState>>,
     acceptor_network_vec: Arc<RwLock<Vec<AcceptorNetworkStruct>>>,
     local_proposer: Arc<Mutex<Proposer>>,
     sender_client: Arc<SendToForwardServer>,
@@ -55,7 +54,6 @@ async fn run_tokio_things(
     let app = Router::new()
         .route("/accept", post(accept))
         .layer(Extension(local_acceptor.clone()))
-        .layer(Extension(shared_state))
         .route("/proposevalue", post(propose_value))
         .layer(Extension(acceptor_network_vec))
         .layer(Extension(local_proposer))
@@ -88,7 +86,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::subscriber::set_global_default(subscriber).unwrap();
 
     let my_port = *args.get_one::<u16>("MyPort").unwrap();
-    let shared_state = Arc::new(Mutex::new(SharedState {}));
 
     let shared_acceptor = Arc::new(Mutex::new(basic_paxos_lib::acceptors::Acceptor::default()));
 
@@ -130,7 +127,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tokio_join_handle = std::thread::spawn(move || {
         tokio_runtime.block_on(run_tokio_things(
             shared_acceptor,
-            shared_state,
             acceptor_network_vec,
             local_proposer,
             sender_client,
@@ -149,7 +145,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[derive(Deserialize, Serialize, Debug)]
 struct AcceptRequestBody {
-    propsing_ballot_num: usize,
+    proposing_ballot_num: usize,
     node_identifier: usize,
     value: usize,
 }
@@ -165,9 +161,6 @@ struct HighestBallotPromisedWrapper {
 }
 
 /// This is what the acceptors will receive accept requests on
-/// This will need to have access to the acceptors, but doesn't need access to anything else
-/// TODO The return type should probably not be that
-/// :
 #[instrument]
 async fn accept(
     acceptor_state: Extension<Arc<Mutex<basic_paxos_lib::acceptors::Acceptor>>>,
@@ -176,7 +169,7 @@ async fn accept(
     info!("accepting_value");
     let mut lock = acceptor_state.lock().await;
     let result = lock.accept(
-        request_body.propsing_ballot_num,
+        request_body.proposing_ballot_num,
         request_body.node_identifier,
         request_body.value,
     );
@@ -186,7 +179,7 @@ async fn accept(
 }
 
 #[derive(Deserialize, Debug)]
-struct ProposeValueResut {
+struct ProposeValueResult {
     proposing_value: usize,
 }
 
@@ -196,13 +189,10 @@ struct AcceptorNetworkStruct {
 }
 
 /// The endpoint which the clients will call to propose a value.
-/// This will need access to proposers and possibly it's acceptor.  
-/// The reason for this is instead of calling accept to this node's port
-/// it could just call the accept function
 #[debug_handler]
 #[instrument]
 async fn propose_value(
-    Json(proposing_value): Json<ProposeValueResut>,
+    Json(proposing_value): Json<ProposeValueResult>,
     Extension(acceptor_network_vec): Extension<Arc<RwLock<Vec<AcceptorNetworkStruct>>>>,
     Extension(local_proposer): Extension<Arc<Mutex<basic_paxos_lib::proposers::Proposer>>>,
     Extension(send_to_forward_server): Extension<Arc<SendToForwardServer>>, // I think it's fine for this to lock the whole proposer since all proposed values should be sequential for the node
@@ -245,7 +235,7 @@ async fn receive_promise(
     acceptor_state: Extension<Arc<Mutex<basic_paxos_lib::acceptors::Acceptor>>>,
     Json(request_body): extract::Json<PromiseRequest>,
 ) -> Json<Result<Option<AcceptedValue>, PromiseReturnWrapper>> {
-    info!("recieing_promise");
+    info!("receiving_promise");
     let result = acceptor_state
         .lock()
         .await
@@ -258,7 +248,7 @@ async fn receive_promise(
     Json(result.map_err(|err| dbg!(dbg!(PromiseReturnWrapper(err)))))
 }
 
-#[derive(Debug, Serialize, Deserialize)] // These should be behind a featuer flag probably
+#[derive(Debug, Serialize, Deserialize)] // These should be behind a feature flag probably
 struct PromiseReturnWrapper(basic_paxos_lib::PromiseReturn);
 
 impl IntoResponse for PromiseReturnWrapper {
@@ -267,13 +257,11 @@ impl IntoResponse for PromiseReturnWrapper {
     }
 }
 
-async fn start_paxos_server(port: usize, other_ports: Vec<usize>) {}
-
 struct MyExtractor {
     _method: Method,
-    path: String,
-    headers: HeaderMap,
-    query: String,
+    _path: String,
+    _headers: HeaderMap,
+    _query: String,
 }
 
 #[async_trait]
@@ -291,17 +279,19 @@ impl<B: Send> FromRequest<B> for MyExtractor {
             .to_string();
         Ok(MyExtractor {
             _method: method,
-            path,
-            headers,
-            query,
+            _path: path,
+            _headers: headers,
+            _query: query,
         })
     }
 }
 
-struct SharedState {}
-
-// Why the heckie do I have this and the network struct?  Probably just working on it during different days
 #[derive(Debug)]
+/// The struct which will implement SendToAcceptors and allow communication between the Proposers and Acceptors
+///
+/// self.acceptors will contain a hashmap of a mapping between the node identifier and the port which the node lives on
+/// I figured that this would ne nice to have if in the future I want there to be more information on how to send to the acceptor than just the port number.
+/// This will allow the acceptor identifiers to still be a usize while more information can be stored here.
 struct SendToForwardServer {
     /// Keys are the acceptor_identifier while the values are the port which that acceptor is listening on
     acceptors: HashMap<usize, usize>,
@@ -311,10 +301,22 @@ const FORWARDING_PORT: &str = "3000";
 
 #[async_trait]
 impl basic_paxos_lib::SendToAcceptors for &SendToForwardServer {
+    ///
+    /// TODO Add handling of network Errors
+    ///
+    /// Sends an accept request to the forwarding server on port FORWARDING_PORT:3000
+    ///
+    /// # Panics
+    ///
+    /// Panics if any network error is encountered.
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if .
     #[instrument]
     async fn send_accept(
         &self,
-        acceptor_identifier: usize, // In this case this is the port which the acceprot is listening on
+        acceptor_identifier: usize, // In this case this is the port which the acceptors is listening on
         value: usize,
         ballot_num: usize,
         proposer_identifier: usize,
@@ -325,7 +327,7 @@ impl basic_paxos_lib::SendToAcceptors for &SendToForwardServer {
         let path = "http://localhost:".to_string() + forwarding_port + "/accept";
 
         let request_body = AcceptRequestBody {
-            propsing_ballot_num: ballot_num,
+            proposing_ballot_num: ballot_num,
             node_identifier: proposer_identifier,
             value,
         };
@@ -363,6 +365,19 @@ impl basic_paxos_lib::SendToAcceptors for &SendToForwardServer {
         );
         result
     }
+
+    ///
+    /// TODO Add handling of network Errors
+    ///
+    /// Sends a promise request to the forwarding server on port FORWARDING_PORT:3000
+    ///
+    /// # Panics
+    ///
+    /// Panics if any network error is encountered.
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if .
 
     #[instrument]
     async fn send_promise(
