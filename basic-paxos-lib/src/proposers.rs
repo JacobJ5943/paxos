@@ -38,16 +38,11 @@ impl Proposer {
 
         self.current_highest_ballot += 1;
         for acceptor_id in acceptor_identifiers.iter() {
-            sending_promises.push(
-                AwaitingPromise {
-                    acceptor_id: *acceptor_id,
-                }
-                .send_promise(
-                    self.current_highest_ballot,
-                    self.node_identifier,
-                    send_to_acceptors,
-                ),
-            );
+            sending_promises.push(send_to_acceptors.send_promise(
+                *acceptor_id,
+                self.current_highest_ballot,
+                self.node_identifier,
+            ));
         }
 
         let mut promise_futures_unsorted =
@@ -136,14 +131,14 @@ impl Proposer {
         let mut sending_accepts = Vec::new();
         for acceptor_id in acceptor_identifiers.iter() {
             sending_accepts.push(
-                AwaitingAccept {
-                    acceptor_id: *acceptor_id,
-                }
-                .send_accept(
+                //AwaitingAccept {
+                //acceptor_id: *acceptor_id,
+                //}
+                send_to_acceptors.send_accept(
+                    *acceptor_id,
                     proposing_value,
                     self.current_highest_ballot,
                     self.node_identifier,
-                    send_to_acceptors,
                 ),
             );
         }
@@ -156,12 +151,7 @@ impl Proposer {
             let accept_response = accept_futures_unsorted.select_next_some().await;
             match accept_response {
                 Ok(value_accepted) => {
-                    let value_accepted = match value_accepted {
-                        Ok(va) => va,
-                        Err(av) => av.0,
-                    };
-
-                    match accepted_results.entry(value_accepted) {
+                    match accepted_results.entry(value_accepted.0) {
                         std::collections::hash_map::Entry::Occupied(oc) => {
                             *oc.into_mut() += 1;
                         }
@@ -169,14 +159,14 @@ impl Proposer {
                             vac.insert(1);
                         }
                     }
-                    if accepted_results.get(&value_accepted).unwrap() >= &quorum {
+                    if accepted_results.get(&value_accepted.0).unwrap() >= &quorum {
                         //return Ok(value_accepted);// figure out short circuiting later
                         // There was a test that requires all 3/3 acceptors to have accepted.  Only 2/3 did with the short circuit so while decided still failed
                         decided_value = Some(value_accepted)
                         // This value has been accepted
                     }
                 }
-                Err((_awaiting_promise, _highest_ballot_promised)) => {
+                Err(_highest_ballot_promised) => {
                     // todo
                     // Should this have a todo!() macro?
                     // This would be if there was a competing proposer with the same ballot number
@@ -185,7 +175,7 @@ impl Proposer {
         }
 
         if let Some(decided_value) = decided_value {
-            Ok(decided_value)
+            Ok(decided_value.0)
         } else {
             Err(())
         }
@@ -451,82 +441,5 @@ mod prop_tests {
         //assert_eq!(acceptors[0].promised_ballot_num,Some(8));
         //assert_eq!(acceptors[1].promised_ballot_num,Some(8));
         //assert_eq!(acceptors[2].promised_ballot_num,Some(8));
-    }
-}
-
-struct AwaitingPromise {
-    acceptor_id: usize,
-}
-
-impl std::fmt::Debug for AwaitingPromise {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AwaitingPromise")
-            .field("acceptor_id", &self.acceptor_id)
-            .finish()
-    }
-}
-
-impl AwaitingPromise {
-    async fn send_promise(
-        self: AwaitingPromise,
-        ballot_num: usize,
-        proposer_identifier: usize,
-        send_to_acceptors: &impl SendToAcceptors,
-    ) -> Result<Option<AcceptedValue>, PromiseReturn> {
-        let result = send_to_acceptors
-            .send_promise(self.acceptor_id, ballot_num, proposer_identifier)
-            .await;
-
-        match result {
-            Ok(accepted_value) => Ok(accepted_value),
-            Err(promise_return) => Err(promise_return),
-        }
-    }
-}
-struct AwaitingAccept {
-    acceptor_id: usize,
-}
-
-impl std::fmt::Debug for AwaitingAccept {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AwaitingAccept")
-            .field("acceptor_id", &self.acceptor_id)
-            .finish()
-    }
-}
-
-impl AwaitingAccept {
-    async fn send_accept(
-        self: AwaitingAccept,
-        proposing_value: usize,
-        ballot_num: usize,
-        proposer_identifier: usize,
-        send_to_acceptors: &impl SendToAcceptors,
-    ) -> Result<Result<usize, AcceptedValue>, (AwaitingPromise, HighestBallotPromised)> {
-        let result = send_to_acceptors
-            .send_accept(
-                self.acceptor_id,
-                proposing_value,
-                ballot_num,
-                proposer_identifier,
-            )
-            .await;
-
-        match result {
-            Ok(ok_result) => {
-                // This means that the acceptor has already accepted a value for this slot so no progress can be made
-                if ok_result.0 == proposing_value {
-                    Ok(Ok(proposing_value))
-                } else {
-                    Ok(Err(ok_result))
-                }
-            }
-            Err(highest_ballot_promised) => Err((
-                AwaitingPromise {
-                    acceptor_id: self.acceptor_id,
-                },
-                highest_ballot_promised,
-            )),
-        }
     }
 }
