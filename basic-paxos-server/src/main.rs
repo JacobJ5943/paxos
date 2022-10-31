@@ -14,7 +14,7 @@ use axum::{
 use axum_macros::debug_handler;
 use basic_paxos_lib::{acceptors::Acceptor, proposers::Proposer, PromiseReturn};
 use clap::{command, value_parser, Arg, ArgAction};
-use hyper::{Body, Request, StatusCode};
+use hyper::{Body, Request};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, RwLock};
 use tracing::{info, instrument, Level};
@@ -63,7 +63,7 @@ async fn run_tokio_things(
 
     let addr = SocketAddr::from(([127, 0, 0, 1], my_port));
 
-    let server_join_handle = axum::Server::bind(&addr)
+    let _server_join_handle = axum::Server::bind(&addr)
         .serve(app.into_make_service())
         .await;
 
@@ -96,12 +96,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|acceptor_port| AcceptorNetworkStruct { acceptor_port })
         .collect();
 
-    let test = acceptor_network_vec
+    let mut forward_do_hickie: HashMap<usize, usize> = HashMap::new(); // Just doing this so I can test things as they are now
+    for (x, y) in acceptor_network_vec
         .iter()
         .map(|a| (a.acceptor_port, a.acceptor_port))
-        .collect::<Vec<(usize, usize)>>();
-    let mut forward_do_hickie: HashMap<usize, usize> = HashMap::new(); // Just doing this so I can test things as they are now
-    for (x, y) in test.into_iter() {
+    {
         forward_do_hickie.insert(x, y);
     }
     let acceptor_network_vec = Arc::new(RwLock::new(acceptor_network_vec));
@@ -124,7 +123,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //});
 
     let tokio_runtime_cloned = tokio_runtime.clone();
-    let tokio_join_handle = std::thread::spawn(move || {
+    let _tokio_join_handle = std::thread::spawn(move || {
         tokio_runtime.block_on(run_tokio_things(
             shared_acceptor,
             acceptor_network_vec,
@@ -134,7 +133,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))
     });
 
-    let result = run_gui(tokio_runtime_cloned, prop_clone, acpt_clone);
+    run_gui(tokio_runtime_cloned, prop_clone, acpt_clone);
 
     println!("This should go through");
 
@@ -420,7 +419,7 @@ impl basic_paxos_lib::SendToAcceptors for &SendToForwardServer {
         println!("we got the promise response");
 
         // Currently the accept function only returns a result
-        let (parts, body): (_, Body) = response.into_parts();
+        let (_parts, body): (_, Body) = response.into_parts();
         let body = dbg!(hyper::body::to_bytes(body).await).unwrap_or_else(|_| todo!());
 
         serde_json::from_slice::<Result<Option<AcceptedValue>, PromiseReturn>>(dbg!(&body))

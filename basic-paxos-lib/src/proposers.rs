@@ -1,11 +1,10 @@
 use std::collections::HashMap;
 
-use futures::stream::{select_all, FuturesUnordered};
-use futures::{future, select, StreamExt};
+use futures::StreamExt;
 use tracing::{info, instrument};
 
 use crate::{
-    acceptors::{AcceptedValue, Acceptor, HighestBallotPromised},
+    acceptors::{AcceptedValue, HighestBallotPromised},
     PromiseReturn, SendToAcceptors,
 };
 
@@ -37,7 +36,7 @@ impl Proposer {
     ) -> Result<(), (HighestBallotPromised, Option<AcceptedValue>)> {
         let mut sending_promises = Vec::new();
 
-        self.current_highest_ballot = self.current_highest_ballot + 1;
+        self.current_highest_ballot += 1;
         for acceptor_id in acceptor_identifiers.iter() {
             sending_promises.push(
                 AwaitingPromise {
@@ -163,10 +162,10 @@ impl Proposer {
                     };
 
                     match accepted_results.entry(value_accepted) {
-                        std::collections::hash_map::Entry::Occupied(mut oc) => {
+                        std::collections::hash_map::Entry::Occupied(oc) => {
                             *oc.into_mut() += 1;
                         }
-                        std::collections::hash_map::Entry::Vacant(mut vac) => {
+                        std::collections::hash_map::Entry::Vacant(vac) => {
                             vac.insert(1);
                         }
                     }
@@ -177,8 +176,9 @@ impl Proposer {
                         // This value has been accepted
                     }
                 }
-                Err((awaiting_promise, highest_ballot_promised)) => {
+                Err((_awaiting_promise, _highest_ballot_promised)) => {
                     // todo
+                    // Should this have a todo!() macro?
                     // This would be if there was a competing proposer with the same ballot number
                 }
             }
@@ -207,20 +207,16 @@ impl Proposer {
         initial_proposed_value: usize,
         send_to_acceptors: &impl SendToAcceptors,
         acceptor_identifiers: &mut Vec<usize>,
-        total_acceptor_count: usize,
+        _total_acceptor_count: usize, // unused for now, but will probably be a config thing to allow for resizing.  This would determine the quorum based on the slot I suppose?
     ) -> Result<(), usize> {
         info!("Proposing_value");
 
         // This is mut for the case where an acceptor has already accepted a value
         let mut proposing_value = initial_proposed_value;
-        let mut a_value_has_been_accepted = false; // This should really be propsing_value as an option or something
-        let mut accepted_results: HashMap<usize, usize> = HashMap::new();
-
-        let workign_promise_response: Option<PromiseReturn> = None;
 
         let mut decided_value = Err(());
 
-        while let Err(_) = decided_value {
+        while decided_value.is_err() {
             info!("Starting promise while loop.");
             while let Err((highest_ballot, accepted_value)) = dbg!(
                 self.promise_quorum(acceptor_identifiers, send_to_acceptors)

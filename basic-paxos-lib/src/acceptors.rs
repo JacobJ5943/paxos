@@ -3,7 +3,7 @@ use tracing::{info, instrument};
 
 use crate::PromiseReturn;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Acceptor {
     pub promised_ballot_num: Option<usize>,
 
@@ -11,16 +11,6 @@ pub struct Acceptor {
     // This should probably be an option later
     pub promised_node_identifier: usize,
     pub accepted_value: Option<usize>,
-}
-
-impl Default for Acceptor {
-    fn default() -> Self {
-        Self {
-            promised_ballot_num: None,
-            promised_node_identifier: 0,
-            accepted_value: None,
-        }
-    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
