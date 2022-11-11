@@ -189,10 +189,11 @@ impl Proposer {
                             vac.insert(1);
                         }
                     }
-                    if accepted_results.get(&value_accepted.0).unwrap() >= &quorum {
+                    if accepted_results.get(&value_accepted.0).unwrap() >= dbg!(&quorum) {
                         //return Ok(value_accepted);// figure out short circuiting later
                         // There was a test that requires all 3/3 acceptors to have accepted.  Only 2/3 did with the short circuit so while decided still failed
-                        decided_value = Some(value_accepted)
+                        decided_value = Some(value_accepted);
+                        break
                         // This value has been accepted
                     }
                 }
