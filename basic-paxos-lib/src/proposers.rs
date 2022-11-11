@@ -4,17 +4,34 @@ use futures::StreamExt;
 use tracing::{info, instrument};
 
 use crate::{
-    acceptors::{AcceptedValue, HighestBallotPromised},
-    PromiseReturn, SendToAcceptors,
+    acceptors::AcceptedValue, HighestBallotPromised, HighestSlotPromised, PromiseReturn,
+    SendToAcceptors,
 };
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Proposer {
     pub current_highest_ballot: usize,
     pub node_identifier: usize,
+    pub highest_slot: usize,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum ProposingErrors {
+    NewSlot(HighestSlotPromised, HighestBallotPromised),
+    NetworkError, // TODO actually use this error
 }
 
 impl Proposer {
+    pub fn new(node_identifier: usize) -> Self {
+        Self {
+            current_highest_ballot: 0,
+            node_identifier,
+            highest_slot: 0,
+        }
+    }
+
+    // Tests moved to basic-paxos-lib-tests
+
     /// .
     /// Sends the propose message to all acceptors specified by send_to_acceptors.
     /// Returns Ok if all promises returned Ok(None)
@@ -32,14 +49,23 @@ impl Proposer {
     async fn promise_quorum(
         &mut self,
         acceptor_identifiers: &mut Vec<usize>,
+        proposing_slot: usize,
         send_to_acceptors: &impl SendToAcceptors,
-    ) -> Result<(), (HighestBallotPromised, Option<AcceptedValue>)> {
+    ) -> Result<
+        (),
+        (
+            HighestBallotPromised,
+            HighestSlotPromised,
+            Option<AcceptedValue>,
+        ),
+    > {
         let mut sending_promises = Vec::new();
 
         self.current_highest_ballot += 1;
         for acceptor_id in acceptor_identifiers.iter() {
             sending_promises.push(send_to_acceptors.send_promise(
                 *acceptor_id,
+                self.highest_slot,
                 self.current_highest_ballot,
                 self.node_identifier,
             ));
@@ -54,7 +80,7 @@ impl Proposer {
 
         let mut results = Vec::new();
         while results.len() < quorum && !promise_futures_unsorted.is_empty() {
-            let new_result = promise_futures_unsorted.select_next_some().await;
+            let new_result = dbg!(promise_futures_unsorted.select_next_some().await);
             results.push(new_result);
         }
 
@@ -62,11 +88,13 @@ impl Proposer {
 
         let mut working_promise: Option<PromiseReturn> = None;
         for result in results.into_iter() {
+            //dbg!(&result);
             match (result, &mut working_promise) {
                 (Ok(accepted_value), None) => {
                     if let Some(accepted_value) = accepted_value {
                         working_promise = Some(PromiseReturn {
                             highest_ballot_num: self.current_highest_ballot,
+                            current_slot_num: proposing_slot,
                             highest_node_identifier: self.node_identifier,
                             accepted_value: Some(accepted_value).map(|av| av.0),
                         });
@@ -108,6 +136,7 @@ impl Proposer {
                 // This is so gosh darn verbose gross
                 Err((
                     HighestBallotPromised(Some(working_promise_err.highest_ballot_num)),
+                    HighestSlotPromised(working_promise_err.current_slot_num),
                     working_promise_err.accepted_value.map(AcceptedValue),
                 ))
             }
@@ -137,6 +166,7 @@ impl Proposer {
                 send_to_acceptors.send_accept(
                     *acceptor_id,
                     proposing_value,
+                    self.highest_slot,
                     self.current_highest_ballot,
                     self.node_identifier,
                 ),
@@ -195,10 +225,12 @@ impl Proposer {
     pub async fn propose_value(
         &mut self,
         initial_proposed_value: usize,
+        proposing_slot: usize, // I want the propose_value to take a slot since the retry logic if the slot is taken should be up to the user.  This could be changed with a try_propose_value.   Or use like a propose_value_weak as in compare_exchange_weak, compare_exchange
         send_to_acceptors: &impl SendToAcceptors,
         acceptor_identifiers: &mut Vec<usize>,
         _total_acceptor_count: usize, // unused for now, but will probably be a config thing to allow for resizing.  This would determine the quorum based on the slot I suppose?
-    ) -> Result<(), usize> {
+    ) -> Result<usize, ProposingErrors> {
+        // TODO This return type will need to be changed.  This error needs to be either a continuation error where the next slot number is given with the highest promised ballot num at that slot. // The other error type could be some kind of network error
         info!("Proposing_value");
 
         // This is mut for the case where an acceptor has already accepted a value
@@ -208,10 +240,17 @@ impl Proposer {
 
         while decided_value.is_err() {
             info!("Starting promise while loop.");
-            while let Err((highest_ballot, accepted_value)) = dbg!(
-                self.promise_quorum(acceptor_identifiers, send_to_acceptors)
+            while let Err((highest_ballot, highest_slot_proposed, accepted_value)) = dbg!(
+                self.promise_quorum(acceptor_identifiers, proposing_slot, send_to_acceptors)
                     .await
             ) {
+                if *highest_slot_proposed > proposing_slot {
+                    return Err(ProposingErrors::NewSlot(
+                        highest_slot_proposed,
+                        highest_ballot,
+                    ));
+                }
+                assert!(highest_slot_proposed.0 == proposing_slot, "The acceptor should have promised this slot then in which case there wouldn't have been Err");
                 // Safety on unwrap
                 // a promise response will always have a highest ballot or else the promise would succeed
                 if self.current_highest_ballot >= highest_ballot.0.unwrap() {
@@ -244,15 +283,10 @@ impl Proposer {
         }
 
         match decided_value {
-            Ok(decided_value) => {
-                if decided_value != initial_proposed_value {
-                    Err(proposing_value)
-                } else {
-                    Ok(())
-                }
-            }
+            Ok(decided_value) => Ok(decided_value),
             Err(_) => {
                 // This is the case because if a value is not decided the while let loop above will not exit
+                // This could also be if I broke early from the while loop, but I think if that's the case I would want to return the error in that instant?
                 unreachable!()
             }
         }
@@ -261,185 +295,5 @@ impl Proposer {
 
 #[cfg(test)]
 mod prop_tests {
-
-    /*
-     * TODO Add mutexes to control the flow of traffic
-     *
-     * I want to be able to emulate my man in the middle crate with mutexes or some other sync mechanism
-     * This will allow me to write much more complex tests
-     */
-    struct LocalSendToAcceptor {
-        acceptors: Arc<Mutex<Vec<Acceptor>>>,
-    }
-    impl LocalSendToAcceptor {
-        fn new(acceptors: Arc<Mutex<Vec<Acceptor>>>) -> Self {
-            Self { acceptors }
-        }
-    }
-
-    #[async_trait]
-    impl SendToAcceptors for LocalSendToAcceptor {
-        async fn send_accept(
-            &self,
-            acceptor_identifier: usize,
-            value: usize,
-            ballot_num: usize,
-            proposer_identifier: usize,
-        ) -> Result<AcceptedValue, HighestBallotPromised> {
-            self.acceptors.lock().unwrap()[acceptor_identifier].accept(
-                ballot_num,
-                proposer_identifier,
-                value,
-            )
-        }
-
-        async fn send_promise(
-            &self,
-            acceptor_identifier: usize,
-            ballot_num: usize,
-            proposer_identifier: usize,
-        ) -> Result<Option<AcceptedValue>, PromiseReturn> {
-            self.acceptors.lock().unwrap()[acceptor_identifier]
-                .promise(ballot_num, proposer_identifier)
-        }
-    }
-
-    use std::{
-        cell::RefCell,
-        rc::Rc,
-        sync::{Arc, Mutex},
-    };
-
-    use async_trait::async_trait;
-
-    use crate::{
-        acceptors::{AcceptedValue, Acceptor, HighestBallotPromised},
-        proposers::Proposer,
-        PromiseReturn, SendToAcceptors,
-    };
-
-    // IMPORTANT TODO look into tracing-test crate
-    #[test]
-    fn install_subscriber() {
-        let my_sub = tracing_subscriber::FmtSubscriber::new();
-        tracing::subscriber::set_global_default(my_sub).expect("This should not fail");
-    }
-
-    #[test]
-    fn testing_usize_division() {
-        assert_eq!(3 / 2, 1);
-        assert_eq!((3 / 2) + 1, 2);
-        assert_eq!((4 / 2) + 1, 3);
-    }
-    #[test]
-    fn it_works() {
-        let result = 2 + 2;
-        assert_eq!(result, 4);
-    }
-
-    #[tokio::test]
-    async fn test_only_one_proposer() {
-        let mut acceptors = vec![
-            Acceptor::default(),
-            Acceptor::default(),
-            Acceptor::default(),
-        ];
-
-        let mut local_sender = LocalSendToAcceptor::new(Arc::new(Mutex::new(acceptors)));
-
-        let mut proposer = Proposer {
-            current_highest_ballot: 0,
-            node_identifier: 0,
-        };
-
-        let result = proposer
-            .propose_value(5, &local_sender, &mut vec![0, 1, 2], 5)
-            .await;
-
-        assert!(result.is_ok());
-        // Currently this is manually being checked by looking at the tracing output
-        // This should be automated by tracing_test, but first get some tests out and debug
-        //todo!();
-    }
-
-    #[tokio::test]
-    // This test will never nhault because We won't have a quorum and so the prop_a_result will never resolve
-    // i'm not sure how I will write this test
-    async fn test_proposer_a_sends_2_to_two_then_proposer_b_sends_3_to_all_3() {
-        let mut acceptors = vec![
-            Acceptor::default(),
-            Acceptor::default(),
-            Acceptor::default(),
-        ];
-        let mut local_sender = LocalSendToAcceptor::new(Arc::new(Mutex::new(acceptors)));
-        let mut acceptors = vec![0, 1];
-
-        let mut proposer_a = Proposer {
-            current_highest_ballot: 0,
-            node_identifier: 0,
-        };
-
-        let mut proposer_b = Proposer {
-            current_highest_ballot: 0,
-            node_identifier: 1,
-        };
-
-        let prop_a_result = proposer_a
-            .propose_value(2, &local_sender, &mut acceptors, 3)
-            .await;
-        acceptors.push(2);
-        let prop_b_result = proposer_b
-            .propose_value(5, &local_sender, &mut acceptors, 3)
-            .await;
-
-        assert!(prop_a_result.is_ok());
-        assert!(prop_b_result.is_err());
-        assert_eq!(prop_b_result.unwrap_err(), 2);
-    }
-
-    // I'm not totally sure what I want form this test
-    // Currently if the acceptors are promised to a proposer.  If a proposer sends a higher ballot number they will accept it.
-    // This means after the proposer has sent out all of the promises it can just send an accept with the higher number
-    // so the acceptors should accept the value, but might not change their highest ballot count.
-    #[tokio::test]
-    async fn test_take_highest_value_ballot_count() {
-        // I should probably set the node identifier so I don't rely on the default?
-        let mut acceptors = vec![
-            Acceptor::default(),
-            Acceptor::default(),
-            Acceptor::default(),
-        ];
-        acceptors[0].promised_ballot_num = Some(5);
-        acceptors[1].promised_ballot_num = Some(7);
-        acceptors[2].promised_ballot_num = Some(4);
-
-        let mut local_sender = LocalSendToAcceptor::new(Arc::new(Mutex::new(acceptors)));
-        let mut acceptors = vec![0, 1, 2];
-
-        let mut proposer_a = Proposer {
-            current_highest_ballot: 0,
-            node_identifier: 0,
-        };
-
-        let prop_a_result = proposer_a
-            .propose_value(2, &local_sender, &mut acceptors, 3)
-            .await;
-        assert_eq!(proposer_a.current_highest_ballot, 8);
-
-        assert_eq!(
-            local_sender.acceptors.lock().unwrap()[0].accepted_value,
-            Some(2)
-        );
-        assert_eq!(
-            local_sender.acceptors.lock().unwrap()[1].accepted_value,
-            Some(2)
-        );
-        assert_eq!(
-            local_sender.acceptors.lock().unwrap()[2].accepted_value,
-            Some(2)
-        );
-        //assert_eq!(acceptors[0].promised_ballot_num,Some(8));
-        //assert_eq!(acceptors[1].promised_ballot_num,Some(8));
-        //assert_eq!(acceptors[2].promised_ballot_num,Some(8));
-    }
+    // I'm not sure how to test any of these here so instead they will be tested in the basic-paxos-lib-tests crate
 }

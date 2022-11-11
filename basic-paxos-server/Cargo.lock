@@ -194,6 +194,7 @@ dependencies = [
  "async-trait",
  "futures",
  "serde",
+ "tokio",
  "tracing",
  "tracing-subscriber",
 ]

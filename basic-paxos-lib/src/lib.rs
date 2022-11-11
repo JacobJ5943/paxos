@@ -1,4 +1,6 @@
-use acceptors::{AcceptedValue, HighestBallotPromised};
+use std::ops::Deref;
+
+use acceptors::AcceptedValue;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
@@ -6,9 +8,10 @@ pub mod acceptors;
 
 pub mod proposers;
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)] // These should be behind a feature flag probably
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone)] // These should be behind a feature flag probably
 pub struct PromiseReturn {
     highest_ballot_num: usize,
+    current_slot_num: usize,
     highest_node_identifier: usize,
     accepted_value: Option<usize>,
 }
@@ -22,16 +25,31 @@ pub trait SendToAcceptors {
         &self,
         acceptor_identifier: usize,
         value: usize,
+        slot_num: usize,
         ballot_num: usize,
         proposer_identifier: usize,
-    ) -> Result<AcceptedValue, HighestBallotPromised>;
+    ) -> Result<AcceptedValue, (HighestSlotPromised, HighestBallotPromised)>;
     async fn send_promise(
         &self,
         acceptor_identifier: usize,
+        slot_num: usize,
         ballot_num: usize,
         proposer_identifier: usize,
     ) -> Result<Option<AcceptedValue>, PromiseReturn>;
 }
+
+#[derive(Debug, Deserialize, Serialize, Clone, Eq, PartialEq)]
+pub struct HighestSlotPromised(pub usize); // let's have another type because eh I'll refactor later
+
+impl Deref for HighestSlotPromised {
+    type Target = usize;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+#[derive(Debug, Deserialize, Serialize, Clone, Eq, PartialEq)]
+pub struct HighestBallotPromised(pub Option<usize>);
 
 // These will contain the integration tests
 // The hard part about these tests is that I don't currently have a way to
@@ -45,12 +63,5 @@ mod tests {
     fn it_works() {
         let result = 2 + 2;
         assert_eq!(result, 4);
-    }
-
-    #[test]
-    // TODO how do I mock this here?
-    fn test_that_one_deadlock_situation_where_A_proposes_and_accepts_at_one_then_b_proposes_and_accepts_then_a_is_stuck_proposing(
-    ) {
-        todo!();
     }
 }
