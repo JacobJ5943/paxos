@@ -1,11 +1,13 @@
-use std::{collections::HashMap, sync::Arc};
-
 use async_trait::async_trait;
 use basic_paxos_lib::{
     acceptors::{AcceptedValue, Acceptor},
     HighestBallotPromised, HighestSlotPromised, PromiseReturn, SendToAcceptors,
 };
-use tokio::sync::{mpsc::UnboundedSender, Mutex};
+use std::{collections::HashMap, sync::Arc};
+use tokio::sync::{
+    mpsc::{error::SendError, UnboundedSender},
+    Mutex,
+};
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Messages {
@@ -21,6 +23,18 @@ pub enum Messages {
 pub struct LocalMessageController {
     pub acceptors: HashMap<usize, Acceptor>, // <AcceptorIdentifier, Acceptor>
     pub current_messages: Arc<Mutex<Vec<(Messages, UnboundedSender<Messages>)>>>,
+}
+
+#[derive(Debug)]
+pub enum ControllerErrors {
+    MessageNotFound,
+    SendError(SendError<Messages>),
+}
+
+impl From<SendError<Messages>> for ControllerErrors {
+    fn from(val: SendError<Messages>) -> Self {
+        ControllerErrors::SendError(val)
+    }
 }
 
 impl LocalMessageController {
@@ -45,7 +59,10 @@ impl LocalMessageController {
             sender,
         )
     }
-    pub async fn try_send_message(&mut self, message_to_send: &Messages) -> Result<Messages, ()> {
+    pub async fn try_send_message(
+        &mut self,
+        message_to_send: &Messages,
+    ) -> Result<Messages, ControllerErrors> {
         println!("trying to remove message {:?}", &message_to_send);
         let x = self
             .current_messages
@@ -63,7 +80,7 @@ impl LocalMessageController {
                 "Some day I'll allow for message retries in this.  Today is not that day"
             )
         } else if x.is_empty() {
-            Err(())
+            Err(ControllerErrors::MessageNotFound)
         } else {
             let (message, sender) = self.current_messages.lock().await.remove(x[0]);
             match &message {
@@ -83,8 +100,10 @@ impl LocalMessageController {
                     Ok(accept_response)
                 }
                 Messages::AcceptResponse(_acceptor_id, _proposer_id, _accept_response) => {
-                    sender.send(message.clone()).unwrap();
-                    Ok(message)
+                    match sender.send(message.clone()) {
+                        Ok(()) => Ok(message),
+                        Err(send_error) => Err(ControllerErrors::from(send_error)),
+                    }
                 }
                 Messages::PromiseRequest(acceptor_id, proposer_id, slot_num, ballot_num) => {
                     let response = self.acceptors.get_mut(acceptor_id).unwrap().promise(
@@ -101,8 +120,11 @@ impl LocalMessageController {
                     Ok(promise_response)
                 }
                 Messages::PromiseResponse(_, _, _response) => {
-                    sender.send(message.clone()).unwrap();
-                    Ok(message)
+                    let send_result = sender.send(message.clone());
+                    match send_result {
+                        Ok(()) => Ok(message),
+                        Err(send_error) => Err(ControllerErrors::from(send_error)),
+                    }
                 }
             }
         }
@@ -196,7 +218,7 @@ impl SendToAcceptors for LocalMessageSender {
 mod tests {
     use std::collections::HashMap;
 
-    use crate::{LocalMessageController, LocalMessageSender, Messages};
+    use crate::{ControllerErrors, LocalMessageController, LocalMessageSender, Messages};
     use basic_paxos_lib::{
         acceptors::Acceptor,
         proposers::{Proposer, ProposingErrors},
@@ -204,6 +226,31 @@ mod tests {
     };
     use std::time::Duration;
     use tokio::time::{sleep, timeout};
+
+    // This is why it needs to be a macro since expected response can be different
+    async fn send_message_and_response(
+        message_to_send: &Messages,
+        local_message_controller: &mut LocalMessageController,
+        timeout_millis: u64,
+    ) -> Result<Messages, ControllerErrors> {
+        let request_response_message = timeout(
+            std::time::Duration::from_millis(100),
+            local_message_controller.try_send_message(message_to_send),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        let request_response_message_again = timeout(
+            std::time::Duration::from_millis(timeout_millis),
+            local_message_controller.try_send_message(&request_response_message),
+        )
+        .await
+        .unwrap();
+        sleep(std::time::Duration::from_millis(timeout_millis)).await;
+
+        request_response_message_again
+    }
 
     #[test]
     fn it_works() {
@@ -253,120 +300,76 @@ mod tests {
             3,
             "Not all messages have completed"
         );
-        let duration_100_millis = Duration::from_millis(100);
 
-        let promise_response_1 = timeout(
-            duration_100_millis,
-            local_controller.try_send_message(&Messages::PromiseRequest(1, 1, 0, 1)),
+        let _promise_response_message = send_message_and_response(
+            &Messages::PromiseRequest(1, 1, 0, 1),
+            &mut local_controller,
+            100,
         )
         .await
-        .unwrap()
         .unwrap();
-        let promise_response_2 = timeout(
-            duration_100_millis,
-            local_controller.try_send_message(&Messages::PromiseRequest(2, 1, 0, 1)),
+        let _promise_response_message = send_message_and_response(
+            &Messages::PromiseRequest(2, 1, 0, 1),
+            &mut local_controller,
+            100,
         )
         .await
-        .unwrap()
         .unwrap();
-        let promise_response_3 = timeout(
-            duration_100_millis,
-            local_controller.try_send_message(&Messages::PromiseRequest(3, 1, 0, 1)),
+        let _promise_response_message = send_message_and_response(
+            &Messages::PromiseRequest(3, 1, 0, 1),
+            &mut local_controller,
+            100,
         )
         .await
-        .unwrap()
-        .unwrap();
-
-        sleep(Duration::from_millis(100)).await;
+        .unwrap_err(); // The proposer would have reached a quorum and stopped listening
 
         assert_eq!(
             timeout(
-                duration_100_millis,
+                Duration::from_millis(100),
                 local_controller.current_messages.lock()
             )
             .await
             .unwrap()
             .len(),
             3,
-            "Not all messages have completed"
+            "3 accept requests expected. Not all messages have completed"
         );
 
-        let _promise_response_again = timeout(
-            duration_100_millis,
-            local_controller.try_send_message(&promise_response_1),
+        let _response_message = send_message_and_response(
+            &Messages::AcceptRequest(1, 1, 0, 1, 7),
+            &mut local_controller,
+            100,
         )
         .await
-        .unwrap()
         .unwrap();
-        let _promise_response_again = timeout(
-            duration_100_millis,
-            local_controller.try_send_message(&promise_response_2),
+        let _response_message = send_message_and_response(
+            &Messages::AcceptRequest(2, 1, 0, 1, 7),
+            &mut local_controller,
+            100,
         )
         .await
-        .unwrap()
         .unwrap();
-        let _promise_response_again = timeout(
-            duration_100_millis,
-            local_controller.try_send_message(&promise_response_3),
+        let _response_message = send_message_and_response(
+            &Messages::AcceptRequest(3, 1, 0, 1, 7),
+            &mut local_controller,
+            100,
         )
         .await
-        .unwrap()
-        .unwrap();
-
-        sleep(Duration::from_millis(100)).await;
+        .unwrap_err(); // This should be an error since the proposer would have already decided a value and stopped listening
 
         assert_eq!(
             timeout(
-                duration_100_millis,
+                Duration::from_millis(100),
                 local_controller.current_messages.lock()
             )
             .await
             .unwrap()
             .len(),
-            3,
+            0,
             "Not all messages have completed"
         );
 
-        let accept_response_1 = local_controller
-            .try_send_message(&Messages::AcceptRequest(1, 1, 0, 1, 7))
-            .await
-            .unwrap();
-        let accept_response_2 = local_controller
-            .try_send_message(&Messages::AcceptRequest(2, 1, 0, 1, 7))
-            .await
-            .unwrap();
-        let accept_response_3 = local_controller
-            .try_send_message(&Messages::AcceptRequest(3, 1, 0, 1, 7))
-            .await
-            .unwrap();
-
-        sleep(Duration::from_millis(100)).await;
-        assert_eq!(
-            timeout(
-                duration_100_millis,
-                local_controller.current_messages.lock()
-            )
-            .await
-            .unwrap()
-            .len(),
-            3,
-            "Not all messages have completed"
-        );
-
-        let _accept_response_again = local_controller
-            .try_send_message(&accept_response_1)
-            .await
-            .unwrap();
-        let _accept_response_again = local_controller
-            .try_send_message(&accept_response_2)
-            .await
-            .unwrap();
-        let _accept_response_again = local_controller
-            .try_send_message(&accept_response_3)
-            .await
-            .unwrap();
-
-        timeout(duration_100_millis, proposing_join_handle)
+        timeout(Duration::from_millis(100), proposing_join_handle)
             .await
             .unwrap()
             .unwrap();
@@ -439,47 +442,25 @@ mod tests {
             6,
             "6 promise requests expected. Not all messages have completed"
         );
-        let duration_100_millis = Duration::from_millis(100);
 
         // First Proposer 1 proposes value 7
         println!("now prop 1 proposes 7");
-        let promise_response_1 = timeout(
-            duration_100_millis,
-            local_controller.try_send_message(&Messages::PromiseRequest(3, 1, 0, 1)),
+        let _response_message = send_message_and_response(
+            &Messages::PromiseRequest(3, 1, 0, 1),
+            &mut local_controller,
+            100,
         )
-        .await
-        .unwrap()
-        .unwrap();
-        let promise_response_2 = timeout(
-            duration_100_millis,
-            local_controller.try_send_message(&Messages::PromiseRequest(4, 1, 0, 1)),
+        .await;
+        let _response_message = send_message_and_response(
+            &Messages::PromiseRequest(4, 1, 0, 1),
+            &mut local_controller,
+            100,
         )
-        .await
-        .unwrap()
-        .unwrap();
-
-        sleep(Duration::from_millis(100)).await;
-
-        let _promise_response_again = timeout(
-            duration_100_millis,
-            local_controller.try_send_message(&promise_response_1),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        let _promise_response_again = timeout(
-            duration_100_millis,
-            local_controller.try_send_message(&promise_response_2),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-
-        sleep(Duration::from_millis(100)).await;
+        .await;
 
         assert_eq!(
             timeout(
-                duration_100_millis,
+                Duration::from_millis(100),
                 local_controller.current_messages.lock()
             )
             .await
@@ -488,22 +469,16 @@ mod tests {
             7,
             "4 promise requests and 3 accept requests expected. Not all messages have completed"
         );
-
-        let accept_response_1 = local_controller
-            .try_send_message(&Messages::AcceptRequest(3, 1, 0, 1, 7))
-            .await
-            .unwrap();
-
-        let _accept_response_again = local_controller
-            .try_send_message(&accept_response_1)
-            .await
-            .unwrap();
-
-        sleep(Duration::from_millis(100)).await;
+        let _response_message = send_message_and_response(
+            &Messages::AcceptRequest(3, 1, 0, 1, 7),
+            &mut local_controller,
+            100,
+        )
+        .await;
 
         assert_eq!(
             timeout(
-                duration_100_millis,
+                Duration::from_millis(100),
                 local_controller.current_messages.lock()
             )
             .await
@@ -515,42 +490,23 @@ mod tests {
 
         // Next Proposer 2 proposes value 3
         println!("now prop 2 proposes 3");
-        let promise_response_1 = timeout(
-            duration_100_millis,
-            local_controller.try_send_message(&Messages::PromiseRequest(4, 2, 0, 1)),
+        let _response_message = send_message_and_response(
+            &Messages::PromiseRequest(4, 2, 0, 1),
+            &mut local_controller,
+            100,
         )
-        .await
-        .unwrap()
-        .unwrap();
-        let promise_response_2 = timeout(
-            duration_100_millis,
-            local_controller.try_send_message(&Messages::PromiseRequest(5, 2, 0, 1)),
+        .await;
+        let _response_message = send_message_and_response(
+            &Messages::PromiseRequest(5, 2, 0, 1),
+            &mut local_controller,
+            100,
         )
-        .await
-        .unwrap()
-        .unwrap();
-
-        let _promise_response_again = timeout(
-            duration_100_millis,
-            local_controller.try_send_message(&promise_response_1),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        let _promise_response_again = timeout(
-            duration_100_millis,
-            local_controller.try_send_message(&promise_response_2),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-
-        sleep(Duration::from_millis(100)).await;
+        .await;
 
         // The reason for not needing to up the ballot number is because the proposer id breaks ties and this is prop 2
         assert_eq!(
             timeout(
-                duration_100_millis,
+                Duration::from_millis(100),
                 local_controller.current_messages.lock()
             )
             .await
@@ -560,20 +516,16 @@ mod tests {
             "2 promise requests and 5 accept requests expected. Not all messages have completed"
         );
 
-        let accept_response_2 = local_controller
-            .try_send_message(&Messages::AcceptRequest(5, 2, 0, 1, 3))
-            .await
-            .unwrap();
+        let _response_message = send_message_and_response(
+            &Messages::AcceptRequest(5, 2, 0, 1, 3),
+            &mut local_controller,
+            100,
+        )
+        .await;
 
-        let _accept_response_again = local_controller
-            .try_send_message(&accept_response_2)
-            .await
-            .unwrap();
-
-        sleep(Duration::from_millis(100)).await;
         assert_eq!(
             timeout(
-                duration_100_millis,
+                Duration::from_millis(100),
                 local_controller.current_messages.lock()
             )
             .await
@@ -585,27 +537,22 @@ mod tests {
 
         // Now send the accept for prop 1
 
-        let accept_response_for_prop_1 = local_controller
-            .try_send_message(&Messages::AcceptRequest(4, 1, 0, 1, 7))
-            .await
-            .unwrap();
-        let _accept_response_again = local_controller
-            .try_send_message(&accept_response_for_prop_1)
-            .await
-            .unwrap();
-        let accept_response_for_prop_1 = local_controller
-            .try_send_message(&Messages::AcceptRequest(5, 1, 0, 1, 7))
-            .await
-            .unwrap();
-        let _accept_response_again = local_controller
-            .try_send_message(&accept_response_for_prop_1)
-            .await
-            .unwrap();
+        let _response_message = send_message_and_response(
+            &Messages::AcceptRequest(4, 1, 0, 1, 7),
+            &mut local_controller,
+            100,
+        )
+        .await;
+        let _response_message = send_message_and_response(
+            &Messages::AcceptRequest(5, 1, 0, 1, 7),
+            &mut local_controller,
+            100,
+        )
+        .await;
 
-        sleep(Duration::from_millis(100)).await;
         assert_eq!(
             timeout(
-                duration_100_millis,
+                Duration::from_millis(100),
                 local_controller.current_messages.lock()
             )
             .await
@@ -616,39 +563,21 @@ mod tests {
         );
 
         // prop 1 should now try to promise again
-        let promise_response_1 = timeout(
-            duration_100_millis,
-            local_controller.try_send_message(&Messages::PromiseRequest(3, 1, 0, 2)),
+        let _response_message = send_message_and_response(
+            &Messages::PromiseRequest(3, 1, 0, 2),
+            &mut local_controller,
+            100,
         )
-        .await
-        .unwrap()
-        .unwrap();
-        let promise_response_2 = timeout(
-            duration_100_millis,
-            local_controller.try_send_message(&Messages::PromiseRequest(4, 1, 0, 2)),
+        .await;
+        let _response_message = send_message_and_response(
+            &Messages::PromiseRequest(4, 1, 0, 2),
+            &mut local_controller,
+            100,
         )
-        .await
-        .unwrap()
-        .unwrap();
-
-        let _promise_response_again = timeout(
-            duration_100_millis,
-            local_controller.try_send_message(&promise_response_1),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        let _promise_response_again = timeout(
-            duration_100_millis,
-            local_controller.try_send_message(&promise_response_2),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        sleep(Duration::from_millis(100)).await;
+        .await;
         assert_eq!(
             timeout(
-                duration_100_millis,
+                Duration::from_millis(100),
                 local_controller.current_messages.lock()
             )
             .await
@@ -657,20 +586,16 @@ mod tests {
             8,
             "3 promise requests and 5 accept requests expected. Not all messages have completed"
         );
+        let _response_message = send_message_and_response(
+            &Messages::AcceptRequest(4, 1, 0, 2, 7),
+            &mut local_controller,
+            100,
+        )
+        .await;
 
-        let accept_response_1 = local_controller
-            .try_send_message(&Messages::AcceptRequest(4, 1, 0, 2, 7))
-            .await
-            .unwrap();
-
-        let _accept_response_again = local_controller
-            .try_send_message(&accept_response_1)
-            .await
-            .unwrap();
-        sleep(Duration::from_millis(100)).await;
         assert_eq!(
             timeout(
-                duration_100_millis,
+                Duration::from_millis(100),
                 local_controller.current_messages.lock()
             )
             .await
@@ -680,9 +605,34 @@ mod tests {
             "3 promise requests and 4 accept requests expected. Not all messages have completed"
         );
 
+        let _response_message = send_message_and_response(
+            &Messages::AcceptRequest(3, 1, 0, 2, 7),
+            &mut local_controller,
+            100,
+        )
+        .await
+        .unwrap();
+        let _response_message = send_message_and_response(
+            &Messages::AcceptRequest(4, 2, 0, 1, 3),
+            &mut local_controller,
+            100,
+        )
+        .await
+        .unwrap();
+        let _response_message = send_message_and_response(
+            &Messages::AcceptRequest(3, 2, 0, 1, 3),
+            &mut local_controller,
+            100,
+        )
+        .await
+        .unwrap();
+
         // TODO These both will timeout since I didn't let their accept responses return a quorum.
-        let _result = timeout(duration_100_millis, proposing_1_join_handle).await;
-        let _result = timeout(duration_100_millis, proposing_2_join_handle).await;
+        let _result = timeout(Duration::from_millis(100), proposing_1_join_handle)
+            .await
+            .unwrap()
+            .unwrap();
+        let _result = timeout(Duration::from_millis(100), proposing_2_join_handle).await;
     }
 
     #[tokio::test]
@@ -744,6 +694,7 @@ mod tests {
 
             let expected_err =
                 ProposingErrors::NewSlot(HighestSlotPromised(2), HighestBallotPromised(Some(3)));
+
             assert_eq!(propose_result.unwrap_err(), expected_err);
         });
 
@@ -753,70 +704,32 @@ mod tests {
             3,
             "Not all messages have completed"
         );
-        let duration_100_millis = Duration::from_millis(100);
 
-        let promise_response_1 = timeout(
-            duration_100_millis,
-            local_controller.try_send_message(&Messages::PromiseRequest(1, 1, 0, 1)),
+        let _response_message = send_message_and_response(
+            &Messages::PromiseRequest(1, 1, 0, 1),
+            &mut local_controller,
+            100,
         )
         .await
-        .unwrap()
         .unwrap();
-        let promise_response_2 = timeout(
-            duration_100_millis,
-            local_controller.try_send_message(&Messages::PromiseRequest(2, 1, 0, 1)),
+        let _response_message = send_message_and_response(
+            &Messages::PromiseRequest(2, 1, 0, 1),
+            &mut local_controller,
+            100,
         )
         .await
-        .unwrap()
         .unwrap();
-        let promise_response_3 = timeout(
-            duration_100_millis,
-            local_controller.try_send_message(&Messages::PromiseRequest(3, 1, 0, 1)),
+        let _response_message = send_message_and_response(
+            &Messages::PromiseRequest(3, 1, 0, 1),
+            &mut local_controller,
+            100,
         )
         .await
-        .unwrap()
-        .unwrap();
-
-        sleep(Duration::from_millis(100)).await;
+        .unwrap_err(); // quorum was reached and so there is no sender listening
 
         assert_eq!(
             timeout(
-                duration_100_millis,
-                local_controller.current_messages.lock()
-            )
-            .await
-            .unwrap()
-            .len(),
-            3,
-            "Not all messages have completed"
-        );
-
-        let _promise_response_again = timeout(
-            duration_100_millis,
-            local_controller.try_send_message(&promise_response_1),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        let _promise_response_again = timeout(
-            duration_100_millis,
-            local_controller.try_send_message(&promise_response_2),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        let _promise_response_again = timeout(
-            duration_100_millis,
-            local_controller.try_send_message(&promise_response_3),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        sleep(Duration::from_millis(100)).await;
-
-        assert_eq!(
-            timeout(
-                duration_100_millis,
+                Duration::from_millis(100),
                 local_controller.current_messages.lock()
             )
             .await
