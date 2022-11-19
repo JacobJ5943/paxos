@@ -13,6 +13,7 @@ pub struct Proposer {
     pub current_highest_ballot: usize,
     pub node_identifier: usize,
     pub highest_slot: usize,
+    pub decided_value: Option<usize>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -27,6 +28,7 @@ impl Proposer {
             current_highest_ballot: 0,
             node_identifier,
             highest_slot: 0,
+            decided_value: None,
         }
     }
 
@@ -65,7 +67,7 @@ impl Proposer {
         for acceptor_id in acceptor_identifiers.iter() {
             sending_promises.push(send_to_acceptors.send_promise(
                 *acceptor_id,
-                self.highest_slot,
+                proposing_slot,
                 self.current_highest_ballot,
                 self.node_identifier,
             ));
@@ -153,6 +155,7 @@ impl Proposer {
     async fn accept_quorum(
         &mut self,
         proposing_value: usize,
+        proposing_slot: usize,
         acceptor_identifiers: &mut Vec<usize>,
         send_to_acceptors: &impl SendToAcceptors,
         quorum: usize,
@@ -166,7 +169,7 @@ impl Proposer {
                 send_to_acceptors.send_accept(
                     *acceptor_id,
                     proposing_value,
-                    self.highest_slot,
+                    proposing_slot,
                     self.current_highest_ballot,
                     self.node_identifier,
                 ),
@@ -193,7 +196,7 @@ impl Proposer {
                         //return Ok(value_accepted);// figure out short circuiting later
                         // There was a test that requires all 3/3 acceptors to have accepted.  Only 2/3 did with the short circuit so while decided still failed
                         decided_value = Some(value_accepted);
-                        break
+                        break;
                         // This value has been accepted
                     }
                 }
@@ -251,6 +254,12 @@ impl Proposer {
                         highest_ballot,
                     ));
                 }
+                if *highest_slot_proposed == proposing_slot && self.decided_value.is_some() {
+                    return Err(ProposingErrors::NewSlot(
+                        HighestSlotPromised(*highest_slot_proposed + 1),
+                        highest_ballot,
+                    ));
+                }
                 assert!(highest_slot_proposed.0 == proposing_slot, "The acceptor should have promised this slot then in which case there wouldn't have been Err");
                 // Safety on unwrap
                 // a promise response will always have a highest ballot or else the promise would succeed
@@ -275,6 +284,7 @@ impl Proposer {
             decided_value = self
                 .accept_quorum(
                     proposing_value,
+                    proposing_slot,
                     acceptor_identifiers,
                     send_to_acceptors,
                     quorum,
@@ -284,8 +294,12 @@ impl Proposer {
         }
 
         match decided_value {
-            Ok(decided_value) => Ok(decided_value),
+            Ok(decided_value) => {
+                self.decided_value = Some(decided_value);
+                Ok(decided_value)
+            }
             Err(_) => {
+                self.decided_value = None;
                 // This is the case because if a value is not decided the while let loop above will not exit
                 // This could also be if I broke early from the while loop, but I think if that's the case I would want to return the error in that instant?
                 unreachable!()

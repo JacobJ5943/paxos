@@ -18,6 +18,10 @@ pub struct Acceptor {
 pub struct AcceptedValue(pub usize);
 
 impl Acceptor {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     /// This is how an acceptor receives accept requests.
     ///
     /// Returns Ok of the value Accepted by this acceptor if the ballot number is greater than or equal to what the acceptor has promised.
