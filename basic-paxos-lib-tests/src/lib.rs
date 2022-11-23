@@ -1,229 +1,14 @@
-use async_trait::async_trait;
-use basic_paxos_lib::{
-    acceptors::{AcceptedValue, Acceptor},
-    HighestBallotPromised, HighestSlotPromised, PromiseReturn, SendToAcceptors,
-};
-use std::{collections::HashMap, sync::Arc};
-use tokio::sync::{
-    mpsc::{error::SendError, UnboundedSender},
-    Mutex,
-};
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub enum Messages {
-    AcceptRequest(usize, usize, usize, usize, usize), // AcceptorIdentifier, proposer_id, slot_num, ballot_num, value
-    AcceptResponse(
-        usize,
-        usize,
-        Result<AcceptedValue, (HighestSlotPromised, HighestBallotPromised)>,
-    ), // acceptor_id, proposer_id
-    PromiseRequest(usize, usize, usize, usize), // AcceptorIdentifier, slot_num, ballot_num, proposer_identifier
-    PromiseResponse(usize, usize, Result<Option<AcceptedValue>, PromiseReturn>), // acceptor_id, proposer_id
-}
-pub struct LocalMessageController {
-    pub acceptors: HashMap<usize, Acceptor>, // <AcceptorIdentifier, Acceptor>
-    pub current_messages: Arc<Mutex<Vec<(Messages, UnboundedSender<Messages>)>>>,
-}
-
-#[derive(Debug)]
-pub enum ControllerErrors {
-    MessageNotFound,
-    SendError(SendError<Messages>),
-}
-
-impl From<SendError<Messages>> for ControllerErrors {
-    fn from(val: SendError<Messages>) -> Self {
-        ControllerErrors::SendError(val)
-    }
-}
-
-impl LocalMessageController {
-    pub fn new(
-        acceptors: HashMap<usize, Acceptor>,
-    ) -> (
-        Self,
-        tokio::sync::mpsc::UnboundedSender<(Messages, UnboundedSender<Messages>)>,
-    ) {
-        let current_messages = Arc::new(Mutex::new(Vec::new()));
-        let current_messages_cloned = current_messages.clone();
-        let (sender, receiver) =
-            tokio::sync::mpsc::unbounded_channel::<(Messages, UnboundedSender<Messages>)>();
-
-        tokio::spawn(add_messages_to_queue(current_messages_cloned, receiver));
-
-        (
-            Self {
-                acceptors,
-                current_messages,
-            },
-            sender,
-        )
-    }
-    pub async fn try_send_message(
-        &mut self,
-        message_to_send: &Messages,
-    ) -> Result<Messages, ControllerErrors> {
-        println!("trying to remove message {:?}", &message_to_send);
-        let x = self
-            .current_messages
-            .lock()
-            .await
-            .iter()
-            .enumerate()
-            .filter(|(_, (message_in_vec, _))| message_in_vec == message_to_send)
-            .map(|(index, _other)| index)
-            .clone()
-            .collect::<Vec<usize>>();
-
-        if x.len() > 1 {
-            unimplemented!(
-                "Some day I'll allow for message retries in this.  Today is not that day"
-            )
-        } else if x.is_empty() {
-            Err(ControllerErrors::MessageNotFound)
-        } else {
-            let (message, sender) = self.current_messages.lock().await.remove(x[0]);
-            match &message {
-                Messages::AcceptRequest(acceptor_id, proposer_id, slot_num, ballot_num, value) => {
-                    let response = self.acceptors.get_mut(acceptor_id).unwrap().accept(
-                        *ballot_num,
-                        *slot_num,
-                        *proposer_id,
-                        *value,
-                    );
-                    let accept_response =
-                        Messages::AcceptResponse(*acceptor_id, *proposer_id, response);
-                    self.current_messages
-                        .lock()
-                        .await
-                        .push((accept_response.clone(), sender));
-                    Ok(accept_response)
-                }
-                Messages::AcceptResponse(_acceptor_id, _proposer_id, _accept_response) => {
-                    match sender.send(message.clone()) {
-                        Ok(()) => Ok(message),
-                        Err(send_error) => Err(ControllerErrors::from(send_error)),
-                    }
-                }
-                Messages::PromiseRequest(acceptor_id, proposer_id, slot_num, ballot_num) => {
-                    let response = self.acceptors.get_mut(acceptor_id).unwrap().promise(
-                        *ballot_num,
-                        *slot_num,
-                        *proposer_id,
-                    );
-                    let promise_response =
-                        Messages::PromiseResponse(*acceptor_id, *proposer_id, response);
-                    self.current_messages
-                        .lock()
-                        .await
-                        .push((promise_response.clone(), sender));
-                    Ok(promise_response)
-                }
-                Messages::PromiseResponse(_, _, _response) => {
-                    let send_result = sender.send(message.clone());
-                    match send_result {
-                        Ok(()) => Ok(message),
-                        Err(send_error) => Err(ControllerErrors::from(send_error)),
-                    }
-                }
-            }
-        }
-    }
-}
-
-// This should really be a bounded sender since it's just where to send the response
-async fn add_messages_to_queue(
-    current_messages: Arc<Mutex<Vec<(Messages, UnboundedSender<Messages>)>>>,
-    mut receiver: tokio::sync::mpsc::UnboundedReceiver<(Messages, UnboundedSender<Messages>)>,
-) {
-    loop {
-        println!("waiting for that sweet sweet message");
-        let incoming_message = receiver.recv().await.unwrap();
-        println!("We got a message {:?}", &incoming_message);
-        current_messages.lock().await.push(incoming_message);
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct LocalMessageSender {
-    sender_to_controller: UnboundedSender<(Messages, UnboundedSender<Messages>)>, // The sender is so that the response can also be controlled
-}
-
-#[async_trait]
-impl SendToAcceptors for LocalMessageSender {
-    async fn send_accept(
-        &self,
-        acceptor_identifier: usize,
-        value: usize,
-        slot_num: usize,
-        ballot_num: usize,
-        proposer_identifier: usize,
-    ) -> Result<AcceptedValue, (HighestSlotPromised, HighestBallotPromised)> {
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let send_result = self.sender_to_controller.send((
-            Messages::AcceptRequest(
-                acceptor_identifier,
-                proposer_identifier,
-                slot_num,
-                ballot_num,
-                value,
-            ),
-            sender,
-        ));
-        assert!(send_result.is_ok());
-        let result = receiver.recv().await.unwrap();
-
-        match result {
-            Messages::AcceptResponse(
-                _acceptor_identifier,
-                _proposer_identifier,
-                accept_response,
-            ) => accept_response,
-            _ => panic!("Incorrect response from accept request"),
-        }
-    }
-
-    async fn send_promise(
-        &self,
-        acceptor_identifier: usize,
-        slot_num: usize,
-        ballot_num: usize,
-        proposer_identifier: usize,
-    ) -> Result<Option<AcceptedValue>, PromiseReturn> {
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let send_result = self.sender_to_controller.send((
-            Messages::PromiseRequest(
-                acceptor_identifier,
-                proposer_identifier,
-                slot_num,
-                ballot_num,
-            ),
-            sender,
-        ));
-        assert!(send_result.is_ok());
-        let result = receiver.recv().await.unwrap();
-
-        match result {
-            Messages::PromiseResponse(
-                _acceptor_identifier,
-                _proposer_identifier,
-                promise_response,
-            ) => promise_response,
-            _ => panic!("Incorrect response from promise request"),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{collections::HashMap, sync::Arc};
+    use tokio::sync::Mutex;
 
-    use crate::{ControllerErrors, LocalMessageController, LocalMessageSender, Messages};
     use basic_paxos_lib::{
         acceptors::Acceptor,
         proposers::{Proposer, ProposingErrors},
         HighestBallotPromised, HighestSlotPromised,
     };
+    use paxos_controllers::local_controller::{ControllerErrors, LocalMessageController, Messages};
     use std::time::Duration;
     use tokio::time::{sleep, timeout};
 
@@ -264,10 +49,14 @@ mod tests {
         acceptors.insert(1, Acceptor::default());
         acceptors.insert(2, Acceptor::default());
         acceptors.insert(3, Acceptor::default());
-        let (mut local_controller, sender) = LocalMessageController::new(acceptors.clone());
-        let local_message_sender = LocalMessageSender {
-            sender_to_controller: sender,
-        };
+        let acceptors = acceptors
+            .into_iter()
+            .fold(HashMap::new(), |mut acc, (key, value)| {
+                acc.insert(key, Arc::new(Mutex::new(value)));
+                acc
+            });
+        let (mut local_controller, local_message_sender) =
+            LocalMessageController::new(acceptors.clone());
 
         let mut acceptor_ids: Vec<usize> = acceptors.keys().copied().collect();
 
@@ -302,21 +91,36 @@ mod tests {
         );
 
         let _promise_response_message = send_message_and_response(
-            &Messages::PromiseRequest(1, 1, 0, 1),
+            &Messages::PromiseRequest {
+                acceptor_id: 1,
+                proposer_id: 1,
+                slot_num: 0,
+                ballot_num: 1,
+            },
             &mut local_controller,
             100,
         )
         .await
         .unwrap();
         let _promise_response_message = send_message_and_response(
-            &Messages::PromiseRequest(2, 1, 0, 1),
+            &Messages::PromiseRequest {
+                acceptor_id: 2,
+                proposer_id: 1,
+                slot_num: 0,
+                ballot_num: 1,
+            },
             &mut local_controller,
             100,
         )
         .await
         .unwrap();
         let _promise_response_message = send_message_and_response(
-            &Messages::PromiseRequest(3, 1, 0, 1),
+            &Messages::PromiseRequest {
+                acceptor_id: 3,
+                proposer_id: 1,
+                slot_num: 0,
+                ballot_num: 1,
+            },
             &mut local_controller,
             100,
         )
@@ -336,21 +140,39 @@ mod tests {
         );
 
         let _response_message = send_message_and_response(
-            &Messages::AcceptRequest(1, 1, 0, 1, 7),
+            &Messages::AcceptRequest {
+                acceptor_id: 1,
+                proposer_id: 1,
+                ballot_num: 1,
+                slot_num: 0,
+                value: 7,
+            },
             &mut local_controller,
             100,
         )
         .await
         .unwrap();
         let _response_message = send_message_and_response(
-            &Messages::AcceptRequest(2, 1, 0, 1, 7),
+            &Messages::AcceptRequest {
+                acceptor_id: 2,
+                proposer_id: 1,
+                ballot_num: 1,
+                slot_num: 0,
+                value: 7,
+            },
             &mut local_controller,
             100,
         )
         .await
         .unwrap();
         let _response_message = send_message_and_response(
-            &Messages::AcceptRequest(3, 1, 0, 1, 7),
+            &Messages::AcceptRequest {
+                acceptor_id: 3,
+                proposer_id: 1,
+                ballot_num: 1,
+                slot_num: 0,
+                value: 7,
+            },
             &mut local_controller,
             100,
         )
@@ -395,10 +217,14 @@ mod tests {
         acceptors.insert(3, Acceptor::default());
         acceptors.insert(4, Acceptor::default());
         acceptors.insert(5, Acceptor::default());
-        let (mut local_controller, sender) = LocalMessageController::new(acceptors.clone());
-        let local_message_sender = LocalMessageSender {
-            sender_to_controller: sender,
-        };
+        let acceptors = acceptors
+            .into_iter()
+            .fold(HashMap::new(), |mut acc, (key, value)| {
+                acc.insert(key, Arc::new(Mutex::new(value)));
+                acc
+            });
+        let (mut local_controller, local_message_sender) =
+            LocalMessageController::new(acceptors.clone());
 
         let mut acceptor_ids: Vec<usize> = acceptors.keys().copied().collect();
 
@@ -446,13 +272,23 @@ mod tests {
         // First Proposer 1 proposes value 7
         println!("now prop 1 proposes 7");
         let _response_message = send_message_and_response(
-            &Messages::PromiseRequest(3, 1, 0, 1),
+            &Messages::PromiseRequest {
+                acceptor_id: 3,
+                proposer_id: 1,
+                slot_num: 0,
+                ballot_num: 1,
+            },
             &mut local_controller,
             100,
         )
         .await;
         let _response_message = send_message_and_response(
-            &Messages::PromiseRequest(4, 1, 0, 1),
+            &Messages::PromiseRequest {
+                acceptor_id: 4,
+                proposer_id: 1,
+                slot_num: 0,
+                ballot_num: 1,
+            },
             &mut local_controller,
             100,
         )
@@ -470,7 +306,13 @@ mod tests {
             "4 promise requests and 3 accept requests expected. Not all messages have completed"
         );
         let _response_message = send_message_and_response(
-            &Messages::AcceptRequest(3, 1, 0, 1, 7),
+            &Messages::AcceptRequest {
+                acceptor_id: 3,
+                proposer_id: 1,
+                slot_num: 0,
+                ballot_num: 1,
+                value: 7,
+            },
             &mut local_controller,
             100,
         )
@@ -491,13 +333,23 @@ mod tests {
         // Next Proposer 2 proposes value 3
         println!("now prop 2 proposes 3");
         let _response_message = send_message_and_response(
-            &Messages::PromiseRequest(4, 2, 0, 1),
+            &Messages::PromiseRequest {
+                acceptor_id: 4,
+                proposer_id: 2,
+                slot_num: 0,
+                ballot_num: 1,
+            },
             &mut local_controller,
             100,
         )
         .await;
         let _response_message = send_message_and_response(
-            &Messages::PromiseRequest(5, 2, 0, 1),
+            &Messages::PromiseRequest {
+                acceptor_id: 5,
+                proposer_id: 2,
+                slot_num: 0,
+                ballot_num: 1,
+            },
             &mut local_controller,
             100,
         )
@@ -517,7 +369,13 @@ mod tests {
         );
 
         let _response_message = send_message_and_response(
-            &Messages::AcceptRequest(5, 2, 0, 1, 3),
+            &Messages::AcceptRequest {
+                acceptor_id: 5,
+                proposer_id: 2,
+                slot_num: 0,
+                ballot_num: 1,
+                value: 3,
+            },
             &mut local_controller,
             100,
         )
@@ -538,13 +396,25 @@ mod tests {
         // Now send the accept for prop 1
 
         let _response_message = send_message_and_response(
-            &Messages::AcceptRequest(4, 1, 0, 1, 7),
+            &Messages::AcceptRequest {
+                acceptor_id: 4,
+                proposer_id: 1,
+                slot_num: 0,
+                ballot_num: 1,
+                value: 7,
+            },
             &mut local_controller,
             100,
         )
         .await;
         let _response_message = send_message_and_response(
-            &Messages::AcceptRequest(5, 1, 0, 1, 7),
+            &Messages::AcceptRequest {
+                acceptor_id: 5,
+                proposer_id: 1,
+                slot_num: 0,
+                ballot_num: 1,
+                value: 7,
+            },
             &mut local_controller,
             100,
         )
@@ -564,13 +434,23 @@ mod tests {
 
         // prop 1 should now try to promise again
         let _response_message = send_message_and_response(
-            &Messages::PromiseRequest(3, 1, 0, 2),
+            &Messages::PromiseRequest {
+                acceptor_id: 3,
+                proposer_id: 1,
+                slot_num: 0,
+                ballot_num: 2,
+            },
             &mut local_controller,
             100,
         )
         .await;
         let _response_message = send_message_and_response(
-            &Messages::PromiseRequest(4, 1, 0, 2),
+            &Messages::PromiseRequest {
+                acceptor_id: 4,
+                proposer_id: 1,
+                slot_num: 0,
+                ballot_num: 2,
+            },
             &mut local_controller,
             100,
         )
@@ -587,7 +467,13 @@ mod tests {
             "3 promise requests and 5 accept requests expected. Not all messages have completed"
         );
         let _response_message = send_message_and_response(
-            &Messages::AcceptRequest(4, 1, 0, 2, 7),
+            &Messages::AcceptRequest {
+                acceptor_id: 4,
+                proposer_id: 1,
+                slot_num: 0,
+                ballot_num: 2,
+                value: 7,
+            },
             &mut local_controller,
             100,
         )
@@ -606,21 +492,39 @@ mod tests {
         );
 
         let _response_message = send_message_and_response(
-            &Messages::AcceptRequest(3, 1, 0, 2, 7),
+            &Messages::AcceptRequest {
+                acceptor_id: 3,
+                proposer_id: 1,
+                slot_num: 0,
+                ballot_num: 2,
+                value: 7,
+            },
             &mut local_controller,
             100,
         )
         .await
         .unwrap();
         let _response_message = send_message_and_response(
-            &Messages::AcceptRequest(4, 2, 0, 1, 3),
+            &Messages::AcceptRequest {
+                acceptor_id: 4,
+                proposer_id: 2,
+                slot_num: 0,
+                ballot_num: 1,
+                value: 3,
+            },
             &mut local_controller,
             100,
         )
         .await
         .unwrap();
         let _response_message = send_message_and_response(
-            &Messages::AcceptRequest(3, 2, 0, 1, 3),
+            &Messages::AcceptRequest {
+                acceptor_id: 3,
+                proposer_id: 2,
+                slot_num: 0,
+                ballot_num: 1,
+                value: 3,
+            },
             &mut local_controller,
             100,
         )
@@ -628,7 +532,7 @@ mod tests {
         .unwrap();
 
         // TODO These both will timeout since I didn't let their accept responses return a quorum.
-        let _result = timeout(Duration::from_millis(100), proposing_1_join_handle)
+        timeout(Duration::from_millis(100), proposing_1_join_handle)
             .await
             .unwrap()
             .unwrap();
@@ -665,10 +569,15 @@ mod tests {
                 accepted_value: None,
             },
         );
-        let (mut local_controller, sender) = LocalMessageController::new(acceptors.clone());
-        let local_message_sender = LocalMessageSender {
-            sender_to_controller: sender,
-        };
+
+        let acceptors = acceptors
+            .into_iter()
+            .fold(HashMap::new(), |mut acc, (key, value)| {
+                acc.insert(key, Arc::new(Mutex::new(value)));
+                acc
+            });
+        let (mut local_controller, local_message_sender) =
+            LocalMessageController::new(acceptors.clone());
 
         let mut acceptor_ids: Vec<usize> = acceptors.keys().copied().collect();
 
@@ -706,21 +615,36 @@ mod tests {
         );
 
         let _response_message = send_message_and_response(
-            &Messages::PromiseRequest(1, 1, 0, 1),
+            &Messages::PromiseRequest {
+                acceptor_id: 1,
+                proposer_id: 1,
+                slot_num: 0,
+                ballot_num: 1,
+            },
             &mut local_controller,
             100,
         )
         .await
         .unwrap();
         let _response_message = send_message_and_response(
-            &Messages::PromiseRequest(2, 1, 0, 1),
+            &Messages::PromiseRequest {
+                acceptor_id: 2,
+                proposer_id: 1,
+                slot_num: 0,
+                ballot_num: 1,
+            },
             &mut local_controller,
             100,
         )
         .await
         .unwrap();
         let _response_message = send_message_and_response(
-            &Messages::PromiseRequest(3, 1, 0, 1),
+            &Messages::PromiseRequest {
+                acceptor_id: 3,
+                proposer_id: 1,
+                slot_num: 0,
+                ballot_num: 1,
+            },
             &mut local_controller,
             100,
         )

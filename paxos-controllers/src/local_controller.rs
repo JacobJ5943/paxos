@@ -1,18 +1,39 @@
-use std::{collections::HashMap, sync::{Arc}};
+use std::{collections::HashMap, sync::Arc};
 
-use basic_paxos_lib::{HighestBallotPromised, PromiseReturn, acceptors::{AcceptedValue, Acceptor}, HighestSlotPromised, SendToAcceptors};
-use tokio::sync::{Mutex, mpsc::{UnboundedSender, error::SendError}};
+use basic_paxos_lib::{
+    acceptors::{AcceptedValue, Acceptor},
+    HighestBallotPromised, HighestSlotPromised, PromiseReturn, SendToAcceptors,
+};
+use tokio::sync::{
+    mpsc::{error::SendError, UnboundedSender},
+    Mutex,
+};
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Messages {
-    AcceptRequest(usize, usize, usize, usize, usize), // AcceptorIdentifier, proposer_id, slot_num, ballot_num, value
-    AcceptResponse(
-        usize,
-        usize,
-        Result<AcceptedValue, (HighestSlotPromised, HighestBallotPromised)>,
-    ), // acceptor_id, proposer_id
-    PromiseRequest(usize, usize, usize, usize), // AcceptorIdentifier, slot_num, ballot_num, proposer_identifier
-    PromiseResponse(usize, usize, Result<Option<AcceptedValue>, PromiseReturn>), // acceptor_id, proposer_id
+    AcceptRequest {
+        acceptor_id: usize,
+        proposer_id: usize,
+        slot_num: usize,
+        ballot_num: usize,
+        value: usize,
+    },
+    AcceptResponse {
+        acceptor_id: usize,
+        proposer_id: usize,
+        accept_result: Result<AcceptedValue, (HighestSlotPromised, HighestBallotPromised)>,
+    },
+    PromiseRequest {
+        acceptor_id: usize,
+        slot_num: usize,
+        ballot_num: usize,
+        proposer_id: usize,
+    },
+    PromiseResponse {
+        acceptor_id: usize,
+        proposer_id: usize,
+        promise_result: Result<Option<AcceptedValue>, PromiseReturn>,
+    },
 }
 
 #[derive(Default)]
@@ -34,12 +55,7 @@ impl From<SendError<Messages>> for ControllerErrors {
 }
 
 impl LocalMessageController {
-    pub fn new(
-        acceptors: HashMap<usize, Arc<Mutex<Acceptor>>>,
-    ) -> (
-        Self,
-        LocalMessageSender,
-    ) {
+    pub fn new(acceptors: HashMap<usize, Arc<Mutex<Acceptor>>>) -> (Self, LocalMessageSender) {
         let current_messages = Arc::new(Mutex::new(Vec::new()));
         let current_messages_cloned = current_messages.clone();
         let (sender, receiver) =
@@ -52,7 +68,9 @@ impl LocalMessageController {
                 acceptors,
                 current_messages,
             },
-            LocalMessageSender{ sender_to_controller: sender },
+            LocalMessageSender {
+                sender_to_controller: sender,
+            },
         )
     }
     pub async fn try_send_message(
@@ -60,10 +78,10 @@ impl LocalMessageController {
         message_to_send: &Messages,
     ) -> Result<Messages, ControllerErrors> {
         println!("trying to remove message {:?}", &message_to_send);
-        let x = self
+        let x = dbg!(self
             .current_messages
             .lock()
-            .await
+            .await)
             .iter()
             .enumerate()
             .filter(|(_, (message_in_vec, _))| message_in_vec == message_to_send)
@@ -80,44 +98,66 @@ impl LocalMessageController {
         } else {
             let (message, sender) = self.current_messages.lock().await.remove(x[0]);
             match &message {
-                Messages::AcceptRequest(acceptor_id, proposer_id, slot_num, ballot_num, value) => {
+                Messages::AcceptRequest {
+                    acceptor_id,
+                    proposer_id,
+                    slot_num,
+                    ballot_num,
+                    value,
+                } => {
                     // The lock is only for the duration of the accept which is not waiting on other messages so a deadlock cannot occur
-                    let response = self.acceptors.get_mut(acceptor_id).unwrap().lock().await.accept(
-                        *ballot_num,
-                        *slot_num,
-                        *proposer_id,
-                        *value,
-                    );
-                    let accept_response =
-                        Messages::AcceptResponse(*acceptor_id, *proposer_id, response);
+                    let response = self
+                        .acceptors
+                        .get_mut(acceptor_id)
+                        .unwrap()
+                        .lock()
+                        .await
+                        .accept(*ballot_num, *slot_num, *proposer_id, *value);
+                    let accept_response = Messages::AcceptResponse {
+                        acceptor_id: *acceptor_id,
+                        proposer_id: *proposer_id,
+                        accept_result: response,
+                    };
                     self.current_messages
                         .lock()
                         .await
                         .push((accept_response.clone(), sender));
                     Ok(accept_response)
                 }
-                Messages::AcceptResponse(_acceptor_id, _proposer_id, _accept_response) => {
-                    match sender.send(message.clone()) {
-                        Ok(()) => Ok(message),
-                        Err(send_error) => Err(ControllerErrors::from(send_error)),
-                    }
-                }
-                Messages::PromiseRequest(acceptor_id, proposer_id, slot_num, ballot_num) => {
+                Messages::AcceptResponse {
+                    acceptor_id:_,
+                    proposer_id:_,
+                    accept_result:_,
+                } => match sender.send(message.clone()) {
+                    Ok(()) => Ok(message),
+                    Err(send_error) => Err(ControllerErrors::from(send_error)),
+                },
+                Messages::PromiseRequest {
+                    acceptor_id,
+                    proposer_id,
+                    slot_num,
+                    ballot_num,
+                } => {
                     // The lock is only for the duration of the promise which is not waiting on other messages so a deadlock cannot occur
-                    let response = self.acceptors.get_mut(acceptor_id).unwrap().lock().await.promise(
-                        *ballot_num,
-                        *slot_num,
-                        *proposer_id,
-                    );
-                    let promise_response =
-                        Messages::PromiseResponse(*acceptor_id, *proposer_id, response);
+                    let response = self
+                        .acceptors
+                        .get_mut(acceptor_id)
+                        .unwrap()
+                        .lock()
+                        .await
+                        .promise(*ballot_num, *slot_num, *proposer_id);
+                    let promise_response = Messages::PromiseResponse {
+                        acceptor_id: *acceptor_id,
+                        proposer_id: *proposer_id,
+                        promise_result: response,
+                    };
                     self.current_messages
                         .lock()
                         .await
                         .push((promise_response.clone(), sender));
                     Ok(promise_response)
                 }
-                Messages::PromiseResponse(_, _, _response) => {
+                Messages::PromiseResponse { .. } => {
                     let send_result = sender.send(message.clone());
                     match send_result {
                         Ok(()) => Ok(message),
@@ -159,24 +199,24 @@ impl SendToAcceptors for LocalMessageSender {
     ) -> Result<AcceptedValue, (HighestSlotPromised, HighestBallotPromised)> {
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         let send_result = self.sender_to_controller.send((
-            Messages::AcceptRequest(
-                acceptor_identifier,
-                proposer_identifier,
+            Messages::AcceptRequest {
+                acceptor_id: acceptor_identifier,
+                proposer_id: proposer_identifier,
                 slot_num,
                 ballot_num,
                 value,
-            ),
+            },
             sender,
         ));
         assert!(send_result.is_ok());
         let result = receiver.recv().await.unwrap();
 
         match result {
-            Messages::AcceptResponse(
-                _acceptor_identifier,
-                _proposer_identifier,
-                accept_response,
-            ) => accept_response,
+            Messages::AcceptResponse {
+                acceptor_id: _acceptor_identifier,
+                proposer_id: _proposer_identifier,
+                accept_result,
+            } => accept_result,
             _ => panic!("Incorrect response from accept request"),
         }
     }
@@ -190,23 +230,19 @@ impl SendToAcceptors for LocalMessageSender {
     ) -> Result<Option<AcceptedValue>, PromiseReturn> {
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         let send_result = self.sender_to_controller.send((
-            Messages::PromiseRequest(
-                acceptor_identifier,
-                proposer_identifier,
+            Messages::PromiseRequest {
+                acceptor_id: acceptor_identifier,
+                proposer_id: proposer_identifier,
                 slot_num,
                 ballot_num,
-            ),
+            },
             sender,
         ));
         assert!(send_result.is_ok());
         let result = receiver.recv().await.unwrap();
 
         match result {
-            Messages::PromiseResponse(
-                _acceptor_identifier,
-                _proposer_identifier,
-                promise_response,
-            ) => promise_response,
+            Messages::PromiseResponse { promise_result, .. } => promise_result,
             _ => panic!("Incorrect response from promise request"),
         }
     }
