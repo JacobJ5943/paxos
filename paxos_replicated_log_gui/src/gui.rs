@@ -61,82 +61,84 @@ impl eframe::App for MyEguiApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             let frame = self.receive_frames.recv().unwrap();
             let mut proposed_values: Vec<(usize, usize)> = Vec::new();
-            egui::Grid::new("the_grid_of_servers")
-                .striped(true)
+            let full_window_size = ui.available_size();
+            egui::Grid::new(format!("another_another_grid"))
+                .max_col_width((full_window_size.x - 12.0) / frame.servers.len() as f32)
                 .show(ui, |ui| {
                     for (index, server) in frame.servers.iter().enumerate() {
-                        ui.vertical(|ui| {
-                            egui::Frame::none()
-                                .stroke(Stroke {
-                                    width: 2.0,
-                                    color: Color32::RED,
-                                })
-                                .show(ui, |ui| {
-                                    ui.label("label");
+                        egui::Frame::none()
+                            .stroke(Stroke {
+                                width: 2.0,
+                                color: Color32::RED,
+                            })
+                            .show(ui, |ui| {
+                                ui.centered_and_justified(|ui| {
+                                    ui.text_edit_multiline(&mut dbg!(server
+                                        .acceptor_debug
+                                        .clone()));
+                                    ui.text_edit_multiline(&mut server.prop_debug.clone());
+                                    ui.label("Decided_values:");
 
-                                    //ui.end_row();
-                                    ui.horizontal(|ui| {
-                                        egui::Grid::new(format!("antoehr_on_{index}")).show(
-                                            ui,
-                                            |ui| {
-                                                ui.button(&server.acceptor_debug);
-                                                ui.end_row();
-                                                ui.button(&server.prop_debug);
-                                                ui.end_row();
-                                                ui.label("Decided_values");
-                                                ui.end_row();
-                                                for decided_value in server.decided_values.iter() {
-                                                    ui.button(format!("{}", decided_value));
-                                                }
-                                                ui.end_row();
+                                    ui.text_edit_multiline(
+                                        &mut server.decided_values.iter().enumerate().fold(
+                                            String::new(),
+                                            |acc, next| {
+                                                acc + "\n"
+                                                    + &format!("Slot:{},Value:{}", next.0, next.1)
                                             },
+                                        ),
+                                    );
+                                    for (slot, decided_value) in
+                                        server.decided_values.iter().enumerate()
+                                    {
+                                        ui.label(format!("Slot:{},Value:{}", slot, decided_value));
+                                    }
+
+                                    ui.label("Propose Value");
+                                    if ui
+                                        .text_edit_singleline(
+                                            self.propose_value_buffers.get_mut(index).unwrap(),
                                         )
-                                    });
-                                    ui.horizontal(|ui| {
-                                        if ui
-                                            .text_edit_singleline(
-                                                self.propose_value_buffers.get_mut(index).unwrap(),
-                                            )
-                                            .changed()
+                                        .changed()
+                                    {
+                                        // If i have a number 123456 and I try to insert a 'b' after the 3 it will not insert the 'b' and will move the cursor one space to the right
+                                        *self.propose_value_buffers.get_mut(index).unwrap() = self
+                                            .propose_value_buffers
+                                            .get(index)
+                                            .unwrap()
+                                            .chars()
+                                            .filter(|c| {
+                                                HashSet::from([
+                                                    '0', '1', '2', '3', '4', '5', '6', '7', '8',
+                                                    '9',
+                                                ])
+                                                .contains(c)
+                                            })
+                                            .collect();
+                                    }
+                                    if ui.button("propose_value").clicked() {
+                                        if !self
+                                            .propose_value_buffers
+                                            .get(index)
+                                            .unwrap()
+                                            .is_empty()
                                         {
-                                            // If i have a number 123456 and I try to insert a 'b' after the 3 it will not insert the 'b' and will move the cursor one space to the right
-                                            *self.propose_value_buffers.get_mut(index).unwrap() =
+                                            proposed_values.push((
+                                                index,
                                                 self.propose_value_buffers
                                                     .get(index)
                                                     .unwrap()
-                                                    .chars()
-                                                    .filter(|c| {
-                                                        HashSet::from([
-                                                            '0', '1', '2', '3', '4', '5', '6', '7',
-                                                            '8', '9',
-                                                        ])
-                                                        .contains(c)
-                                                    })
-                                                    .collect();
+                                                    .parse::<usize>()
+                                                    .unwrap(),
+                                            ));
+                                            println!("This would proposer the value")
                                         }
-                                        if ui.button("propose_value").clicked() {
-                                            if !self
-                                                .propose_value_buffers
-                                                .get(index)
-                                                .unwrap()
-                                                .is_empty()
-                                            {
-                                                proposed_values.push((
-                                                    index,
-                                                    self.propose_value_buffers
-                                                        .get(index)
-                                                        .unwrap()
-                                                        .parse::<usize>()
-                                                        .unwrap(),
-                                                ));
-                                                println!("This would proposer the value")
-                                            }
-                                        };
-                                    });
-                                })
-                        });
-                    }
-                }); // end server grid
+                                    };
+                                });
+                            });
+                    } // End for loop
+                });
+
             if proposed_values.len() > 1 {
                 panic!("how can you click?");
             }

@@ -194,11 +194,11 @@ async fn the_function_that_actually_sends_the_messages(
         }
         for server in servers.iter() {
             let prop_debug = timeout(Duration::from_millis(10), async {
-                format!("{:?}", server.prop.lock().await)
+                format!("{:#?}", server.prop.lock().await)
             })
             .await
             .unwrap_or_else(|err| "Proposing value currently".to_string());
-            let acceptor_debug = format!("{:?}", server.acceptor.lock().await); // Acceptor should never be locked for an extended period of time so I'm not concerned about this not having a timeout
+            let acceptor_debug = format!("{:#?}", server.acceptor.lock().await); // Acceptor should never be locked for an extended period of time so I'm not concerned about this not having a timeout
 
             if !decided_values_received.is_empty() {
                 let mut server_decided_values = server.decided_values.write().await;
