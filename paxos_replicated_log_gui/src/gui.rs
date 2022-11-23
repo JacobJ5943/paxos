@@ -2,9 +2,7 @@ use std::{collections::HashSet, sync::Arc, thread};
 
 use egui::{Color32, Stroke};
 use flume::{Receiver, Sender};
-use futures::SinkExt;
 use paxos_controllers::local_controller::Messages;
-use tokio::sync::Mutex;
 
 use crate::Frame;
 
@@ -61,17 +59,18 @@ impl eframe::App for MyEguiApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             let frame = self.receive_frames.recv().unwrap();
             let mut proposed_values: Vec<(usize, usize)> = Vec::new();
+            let stroke_width = 2.0;
             let full_window_size = ui.available_size();
-            egui::Grid::new(format!("another_another_grid"))
-                .max_col_width((full_window_size.x - 12.0) / frame.servers.len() as f32)
-                .show(ui, |ui| {
+                ui.horizontal(|ui| {
                     for (index, server) in frame.servers.iter().enumerate() {
                         egui::Frame::none()
-                            .stroke(Stroke {
-                                width: 2.0,
-                                color: Color32::RED,
-                            })
+                             .stroke(Stroke {
+                                 width: stroke_width,
+                                 color: Color32::RED,
+                             })
                             .show(ui, |ui| {
+                                ui.set_height(0.0);
+                                ui.set_width((full_window_size.x / frame.servers.len() as f32) - (stroke_width * 2.0));
                                 ui.centered_and_justified(|ui| {
                                     ui.text_edit_multiline(&mut dbg!(server
                                         .acceptor_debug
@@ -88,6 +87,8 @@ impl eframe::App for MyEguiApp {
                                             },
                                         ),
                                     );
+
+
                                     for (slot, decided_value) in
                                         server.decided_values.iter().enumerate()
                                     {
@@ -116,28 +117,36 @@ impl eframe::App for MyEguiApp {
                                             })
                                             .collect();
                                     }
-                                    if ui.button("propose_value").clicked() {
-                                        if !self
+
+
+                                    if ui.button("propose_value").clicked()
+                                        && !self
                                             .propose_value_buffers
                                             .get(index)
                                             .unwrap()
                                             .is_empty()
-                                        {
-                                            proposed_values.push((
-                                                index,
-                                                self.propose_value_buffers
-                                                    .get(index)
-                                                    .unwrap()
-                                                    .parse::<usize>()
-                                                    .unwrap(),
-                                            ));
-                                            println!("This would proposer the value")
-                                        }
+                                    {
+                                        proposed_values.push((
+                                            index,
+                                            self.propose_value_buffers
+                                                .get(index)
+                                                .unwrap()
+                                                .parse::<usize>()
+                                                .unwrap(),
+                                        ));
+                                        println!("This would proposer the value")
                                     };
                                 });
                             });
                     } // End for loop
                 });
+
+            egui::Frame::none().stroke(Stroke { width: stroke_width, color:Color32::RED})
+            .show(ui, |ui| {
+
+                ui.set_width(full_window_size.x - (stroke_width * 2.0));
+                ui.label("Messages in flight".to_string());
+
 
             if proposed_values.len() > 1 {
                 panic!("how can you click?");
@@ -149,7 +158,7 @@ impl eframe::App for MyEguiApp {
             }
 
             let mut pushed_buttons = Vec::new();
-            egui::Grid::new("waiting_messages").show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
                 for (index, message) in frame.waiting_messages.iter().enumerate() {
                     if ui.button(&format!("{:?}", message)).clicked() {
                         pushed_buttons.push(message.clone());
@@ -158,6 +167,9 @@ impl eframe::App for MyEguiApp {
             });
 
             self.send_message_indecies.send(pushed_buttons).unwrap();
-        });
+
+            });
+
+                    });
     }
 }
