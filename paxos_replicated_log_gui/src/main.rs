@@ -185,12 +185,12 @@ async fn the_function_that_actually_sends_the_messages(
         .map(|server| server.proposer_id)
         .collect::<Vec<usize>>();
 
-    let (send_decided_values, receive_decided_values) = flume::unbounded::<usize>();
+    let (send_decided_values, receive_decided_values) = flume::unbounded::<(usize, usize)>();
     loop {
         let mut server_frames: Vec<ServerFrame> = Vec::new();
         let mut decided_values_received = Vec::new();
-        while let Ok(decided_value) = receive_decided_values.try_recv() {
-            decided_values_received.push(decided_value);
+        while let Ok((slot, decided_value)) = receive_decided_values.try_recv() {
+            decided_values_received.push((slot, decided_value));
         }
         for server in servers.iter() {
             let prop_debug = timeout(Duration::from_millis(10), async {
@@ -202,8 +202,15 @@ async fn the_function_that_actually_sends_the_messages(
 
             if !decided_values_received.is_empty() {
                 let mut server_decided_values = server.decided_values.write().await;
-                for value in decided_values_received.iter() {
-                    server_decided_values.push(*value);
+                for (slot, value) in decided_values_received.iter() {
+                    match server_decided_values.get(*slot) {
+                        Some(already_decided_value) => {
+                            assert_eq!(already_decided_value, value, "A value: {} has already been decided for slot {}.  New Value received: {}",already_decided_value, slot, value);
+                        }
+                        None => {
+                            server_decided_values.push(*value);
+                        }
+                    }
                 }
             }
             let decided_values: Vec<usize> = server.decided_values.read().await.clone();
@@ -270,7 +277,7 @@ async fn the_function_that_actually_sends_the_messages(
                     match propose_result {
                         Ok(decided_value) => {
                             send_decided_values_cloned
-                                .send_async(decided_value)
+                                .send_async((propsing_slot, decided_value))
                                 .await
                                 .unwrap();
                             debug_assert!(
