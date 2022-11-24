@@ -141,7 +141,7 @@ fn create_gui_listener(
  {
     let (send_frame, request_frame) = flume::bounded(1);
     let (send_message_indecies, receive_message_indecies) = flume::bounded(1);
-    let (send_propose_value, receive_propose_value) = flume::bounded(1); // You can only click one button at a time
+    let (send_propose_value, receive_propose_value) = flume::unbounded(); // You can only click one button at a time
     tokio_runtime.spawn(the_function_that_actually_sends_the_messages(
         local_message_controller,
         send_frame,
@@ -250,7 +250,20 @@ async fn the_function_that_actually_sends_the_messages(
         let propose_value = receive_propose_value.try_recv();
         match propose_value {
             Ok((proposer_id, value)) => {
-                let mut server_identifier_cloned = server_identifiers.clone();
+                spawn_and_handle_propose_value(&server_identifiers, &servers, proposer_id, total_acceptor_count, &local_message_sender, &send_decided_values, value);
+            }
+            Err(try_receive_error) => {
+                match try_receive_error {
+                    flume::TryRecvError::Empty => (),
+                    flume::TryRecvError::Disconnected => todo!(), // This shouldn't happen unless the gui gets disconneted
+                }
+            }
+        }
+    }
+
+
+    fn spawn_and_handle_propose_value(server_identifiers: &[usize], servers: &[Server], proposer_id:usize, total_acceptor_count: usize, local_message_sender: &LocalMessageSender, send_decided_values: &Sender<(usize, usize)>, proposing_value:usize) {
+                let mut server_identifier_cloned = server_identifiers.to_owned();
                 // I'm not a fan of how if this fails there won't be any indication
                 // Right now if the there is no retry logic if another proposal is let through with a highest slot
                 let matching_server = servers
@@ -270,7 +283,7 @@ async fn the_function_that_actually_sends_the_messages(
                     let propsing_slot = next_slot_cloned.load(Ordering::SeqCst);
                     let propose_result = proposer_to_propose
                         .propose_value(
-                            value,
+                            proposing_value,
                             propsing_slot,
                             &local_message_sender_cloned,
                             &mut server_identifier_cloned,
@@ -284,11 +297,6 @@ async fn the_function_that_actually_sends_the_messages(
                                 .send_async((propsing_slot, decided_value))
                                 .await
                                 .unwrap();
-                            // Disabling this as it's incorrect.  with the thread the distrpubtes the decided_value this will not be the case
-                            // debug_assert!(
-                            //     dbg!(next_slot_cloned.load(Ordering::SeqCst))
-                            //         == dbg!(decided_values_cloned.read().await.len())
-                            //); // The + 1 is because of the way I select the slot in the loop thing. It's really late and I'm tired
 
                             let next_slot_cloned_value = next_slot_cloned.load(Ordering::SeqCst);
                             let decided_values_len = decided_values_cloned.read().await.len();
@@ -338,13 +346,5 @@ async fn the_function_that_actually_sends_the_messages(
                         }
                     }
                 });
-            }
-            Err(try_receive_error) => {
-                match try_receive_error {
-                    flume::TryRecvError::Empty => (),
-                    flume::TryRecvError::Disconnected => todo!(), // This shouldn't happen unless the gui gets disconneted
-                }
-            }
-        }
     }
 }
