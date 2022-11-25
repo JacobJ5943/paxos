@@ -1,14 +1,14 @@
 use flume::{Receiver, Sender};
 use paxos_controllers::local_controller::{LocalMessageController, LocalMessageSender, Messages};
-use tracing::Level;
 use std::sync::atomic::Ordering;
 use std::{
     collections::HashMap,
     sync::{atomic::AtomicUsize, Arc},
     time::Duration,
 };
+use tracing::Level;
 
-use basic_paxos_lib::{proposers::Proposer};
+use basic_paxos_lib::proposers::Proposer;
 use clap::{command, value_parser, Arg, ArgAction};
 use tokio::{
     sync::{Mutex, RwLock},
@@ -80,38 +80,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio_runtime.block_on(async { LocalMessageController::new(acceptor_hashmap) });
 
     let server_count = servers.len();
-    let GuiListenerResult{receive_frames, send_message_indecies, propose_value_sender} = create_gui_listener(
+    let GuiListenerResult {
+        receive_frames,
+        send_message_indices,
+        propose_value_sender,
+    } = create_gui_listener(
         &tokio_runtime,
         local_message_controller,
         local_message_sender,
         servers,
     );
 
-    //let gui_join_handle = tokio::spawn(async {
-    //gui::run_gui(prop_clone,acpt_clone).await;
-    //});
-
-    /*
-    let _tokio_join_handle = std::thread::spawn(move || {
-        tokio_runtime.block_on(run_tokio_things(
-            shared_acceptor,
-            acceptor_network_vec,
-            local_proposer,
-            sender_client,
-            my_port,
-        ))
-    }); */
-
     run_gui(
         receive_frames,
-        send_message_indecies,
+        send_message_indices,
         server_count,
         propose_value_sender,
     );
-
-    println!("This should go through");
-
-    //let tokio_result = tokio_join_handle.join();
 
     Ok(())
 }
@@ -128,7 +113,9 @@ pub struct Frame {
 }
 
 struct GuiListenerResult {
-receive_frames:Receiver<Frame>, send_message_indecies:Sender<Vec<Messages>>, propose_value_sender:Sender<(usize, usize)>
+    receive_frames: Receiver<Frame>,
+    send_message_indices: Sender<Vec<Messages>>,
+    propose_value_sender: Sender<(usize, usize)>,
 }
 
 fn create_gui_listener(
@@ -136,22 +123,23 @@ fn create_gui_listener(
     local_message_controller: LocalMessageController,
     local_message_sender: LocalMessageSender,
     servers: Vec<Server>,
-) -> 
-    GuiListenerResult
- {
+) -> GuiListenerResult {
     let (send_frame, request_frame) = flume::bounded(1);
-    let (send_message_indecies, receive_message_indecies) = flume::bounded(1);
+    let (send_message_indices, receive_message_indices) = flume::bounded(1);
     let (send_propose_value, receive_propose_value) = flume::unbounded(); // You can only click one button at a time
     tokio_runtime.spawn(the_function_that_actually_sends_the_messages(
         local_message_controller,
         send_frame,
-        receive_message_indecies,
+        receive_message_indices,
         receive_propose_value,
         servers,
         local_message_sender,
     ));
-    //GuiListenerResult{request_frame, send_message_indecies, send_propose_value)
-        GuiListenerResult { receive_frames:  request_frame, send_message_indecies, propose_value_sender: send_propose_value }
+    GuiListenerResult {
+        receive_frames: request_frame,
+        send_message_indices,
+        propose_value_sender: send_propose_value,
+    }
 }
 
 async fn update_decided_values(
@@ -165,7 +153,7 @@ async fn update_decided_values(
 
     for server in servers.iter() {
         if !decided_values_received.is_empty() {
-            let mut server_decided_values = dbg!(server.decided_values.write().await);
+            let mut server_decided_values = server.decided_values.write().await;
             for (slot, value) in decided_values_received.iter() {
                 match server_decided_values.get(*slot) {
                     Some(already_decided_value) => {
@@ -206,6 +194,7 @@ async fn create_server_frames(
     }
     server_frames
 }
+
 async fn the_function_that_actually_sends_the_messages(
     mut local_message_controller: LocalMessageController,
     send_frames: Sender<Frame>,
@@ -250,101 +239,123 @@ async fn the_function_that_actually_sends_the_messages(
         let propose_value = receive_propose_value.try_recv();
         match propose_value {
             Ok((proposer_id, value)) => {
-                spawn_and_handle_propose_value(&server_identifiers, &servers, proposer_id, total_acceptor_count, &local_message_sender, &send_decided_values, value);
+                spawn_and_handle_propose_value(
+                    &server_identifiers,
+                    &servers,
+                    proposer_id,
+                    total_acceptor_count,
+                    &local_message_sender,
+                    &send_decided_values,
+                    value,
+                );
             }
             Err(try_receive_error) => {
                 match try_receive_error {
                     flume::TryRecvError::Empty => (),
-                    flume::TryRecvError::Disconnected => todo!(), // This shouldn't happen unless the gui gets disconneted
+                    flume::TryRecvError::Disconnected => todo!(), // This shouldn't happen unless the gui gets disconnected
                 }
             }
         }
     }
 
+    fn spawn_and_handle_propose_value(
+        server_identifiers: &[usize],
+        servers: &[Server],
+        proposer_id: usize,
+        total_acceptor_count: usize,
+        local_message_sender: &LocalMessageSender,
+        send_decided_values: &Sender<(usize, usize)>,
+        proposing_value: usize,
+    ) {
+        let acceptor_count = total_acceptor_count;
+        let local_message_sender = local_message_sender.clone();
+        let send_decided_values = send_decided_values.clone();
+        let mut server_identifier = server_identifiers.to_owned();
 
-    fn spawn_and_handle_propose_value(server_identifiers: &[usize], servers: &[Server], proposer_id:usize, total_acceptor_count: usize, local_message_sender: &LocalMessageSender, send_decided_values: &Sender<(usize, usize)>, proposing_value:usize) {
-                let mut server_identifier_cloned = server_identifiers.to_owned();
-                // I'm not a fan of how if this fails there won't be any indication
-                // Right now if the there is no retry logic if another proposal is let through with a highest slot
-                let matching_server = servers
-                    .iter()
-                    .find(|server| server.proposer_id == proposer_id)
-                    .expect("proposer_id to be a valid proposer");
-                let propser_to_propose = matching_server.prop.clone();
-                let acceptor_count_cloned = total_acceptor_count;
-                let local_message_sender_cloned = local_message_sender.clone();
-                let decided_values_cloned: Arc<RwLock<Vec<usize>>> =
-                    matching_server.decided_values.clone();
-                let next_slot_cloned = matching_server.next_slot.clone();
-                let send_decided_values_cloned = send_decided_values.clone();
-                tokio::spawn(async move {
-                    let mut proposer_to_propose = propser_to_propose.lock().await;
+        let matching_server = servers
+            .iter()
+            .find(|server| server.proposer_id == proposer_id)
+            .expect("proposer_id to be a valid proposer");
+        let decided_values: Arc<RwLock<Vec<usize>>> = matching_server.decided_values.clone();
+        let next_slot = matching_server.next_slot.clone();
+        let proposer_to_propose = matching_server.prop.clone();
 
-                    let propsing_slot = next_slot_cloned.load(Ordering::SeqCst);
-                    let propose_result = proposer_to_propose
-                        .propose_value(
-                            proposing_value,
-                            propsing_slot,
-                            &local_message_sender_cloned,
-                            &mut server_identifier_cloned,
-                            acceptor_count_cloned,
-                        )
-                        .await;
-                        dbg!(&propose_result);
-                    match propose_result {
-                        Ok(decided_value) => {
-                            send_decided_values_cloned
-                                .send_async((propsing_slot, decided_value))
-                                .await
-                                .unwrap();
+        tokio::spawn(async move {
+            let mut proposer_to_propose = proposer_to_propose.lock().await;
 
-                            let next_slot_cloned_value = next_slot_cloned.load(Ordering::SeqCst);
-                            let decided_values_len = decided_values_cloned.read().await.len();
+            let proposing_slot = next_slot.load(Ordering::SeqCst);
+            let propose_result = proposer_to_propose
+                .propose_value(
+                    proposing_value,
+                    proposing_slot,
+                    &local_message_sender,
+                    &mut server_identifier,
+                    acceptor_count,
+                )
+                .await;
+            match propose_result {
+                Ok(decided_value) => {
+                    send_decided_values
+                        .send_async((proposing_slot, decided_value))
+                        .await
+                        .unwrap();
+                    update_next_slot(next_slot, decided_values, decided_value, proposing_slot).await;
+                }
 
-                            match next_slot_cloned_value.cmp(&decided_values_len) {
-                                std::cmp::Ordering::Equal => decided_values_cloned.write().await.push(decided_value),
-                                std::cmp::Ordering::Less => debug_assert!(decided_values_cloned.read().await.get(propsing_slot).unwrap() == &decided_value),
-                                std::cmp::Ordering::Greater => unimplemented!("TODO I don't know what this case is")
-                            }
-                            let result = next_slot_cloned.compare_exchange(
-                                propsing_slot,
-                                propsing_slot + 1,
-                                Ordering::SeqCst,
-                                Ordering::SeqCst,
-                            );
-                            match result {
-                                Ok(_) => (),
-                                Err(_read_value) => unimplemented!(), // with a proposer being locked this whole time I'm not sure this can happen
+                Err(proposing_error) => {
+                    match proposing_error {
+                        basic_paxos_lib::proposers::ProposingErrors::NewSlot(
+                            highest_slot_returned,
+                            _highest_ballot_returned,
+                        ) => {
+                            let mut current_value = next_slot.load(Ordering::SeqCst);
+                            while let Err(current_value_returned) = next_slot
+                                .compare_exchange_weak(
+                                    current_value,
+                                    *highest_slot_returned,
+                                    Ordering::SeqCst,
+                                    Ordering::SeqCst
+                                )
+                            {
+                                current_value = current_value_returned;
                             }
                         }
-
-                        Err(proposing_error) => {
-                            dbg!(&proposing_error);
-                            match proposing_error {
-                                basic_paxos_lib::proposers::ProposingErrors::NewSlot(
-                                    highest_slot_returned,
-                                    _highest_ballot_returned,
-                                ) => {
-                                    let mut current_value = next_slot_cloned.load(Ordering::SeqCst);
-                                    while let Err(current_value_returned) = dbg!(next_slot_cloned
-                                        .compare_exchange_weak(
-                                            current_value,
-                                            *highest_slot_returned,
-                                            Ordering::SeqCst,
-                                            Ordering::SeqCst
-                                        ))
-                                    {
-                                        current_value = current_value_returned;
-                                    }
-                                    dbg!(*highest_slot_returned);
-                                }
-                                basic_paxos_lib::proposers::ProposingErrors::NetworkError => {
-                                    panic!("network error in local program")
-                                }
-                            };
-                            // Do somethign better later
+                        basic_paxos_lib::proposers::ProposingErrors::NetworkError => {
+                            panic!("network error in local program")
                         }
-                    }
-                });
+                    };
+                }
+            }
+        });
+    }
+
+    async fn update_next_slot(
+        next_slot: Arc<AtomicUsize>,
+        decided_values: Arc<RwLock<Vec<usize>>>,
+        decided_value: usize,
+        proposing_slot: usize,
+    ) {
+        let next_slot_value = next_slot.load(Ordering::SeqCst);
+        let decided_values_len = decided_values.read().await.len();
+
+        match next_slot_value.cmp(&decided_values_len) {
+            std::cmp::Ordering::Equal => decided_values.write().await.push(decided_value),
+            std::cmp::Ordering::Less => debug_assert!(
+                decided_values.read().await.get(proposing_slot).unwrap() == &decided_value
+            ),
+            std::cmp::Ordering::Greater => {
+                unimplemented!("TODO I don't know what this case is")
+            }
+        }
+        let result = next_slot.compare_exchange(
+            proposing_slot,
+            proposing_slot + 1,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
+        match result {
+            Ok(_) => (),
+            Err(_read_value) => unimplemented!(), // with a proposer being locked this whole time I'm not sure this can happen
+        }
     }
 }
