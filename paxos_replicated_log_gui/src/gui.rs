@@ -8,7 +8,7 @@ use crate::Frame;
 
 pub fn run_gui(
     receive_frames: Receiver<Frame>,
-    send_message_indecies: Sender<Vec<Messages>>,
+    send_message_indices: Sender<Vec<Messages>>,
     server_count: usize,
     propose_value_sender: Sender<(usize, usize)>,
 ) {
@@ -20,7 +20,7 @@ pub fn run_gui(
             Box::new(MyEguiApp::new(
                 cc,
                 receive_frames,
-                send_message_indecies,
+                send_message_indices,
                 server_count,
                 propose_value_sender,
             ))
@@ -31,7 +31,7 @@ pub fn run_gui(
 //// EFRAME THINGS BELOW
 struct MyEguiApp {
     receive_frames: Receiver<Frame>,
-    send_message_indecies: Sender<Vec<Messages>>,
+    send_message_indices: Sender<Vec<Messages>>,
     propose_value_buffers: Vec<String>,
     propose_value_sender: Sender<(usize, usize)>,
     waiting_proposed_values: VecDeque<(usize, usize)>,
@@ -41,13 +41,13 @@ impl MyEguiApp {
     fn new(
         _cc: &eframe::CreationContext<'_>,
         receive_frames: Receiver<Frame>,
-        send_message_indecies: Sender<Vec<Messages>>,
+        send_message_indices: Sender<Vec<Messages>>,
         server_count: usize,
         propose_value_sender: Sender<(usize, usize)>,
     ) -> Self {
         Self {
             receive_frames,
-            send_message_indecies,
+            send_message_indices,
             propose_value_buffers: vec!["".to_string(); server_count],
             propose_value_sender,
             waiting_proposed_values: VecDeque::new(),
@@ -154,11 +154,10 @@ impl eframe::App for MyEguiApp {
                     ui.set_width(full_window_size.x - (stroke_width * 2.0));
 
                     for proposed_value in self.waiting_proposed_values.drain(..) {
-                        dbg!(proposed_value);
                         self.propose_value_sender.send(proposed_value).unwrap();
                     }
 
-                    ui.horizontal_wrapped(|ui| {
+                    ui.vertical(|ui| {
                         for (_index, message) in frame.waiting_messages.iter().enumerate() {
                             if ui.button(&format!("{:?}", message)).clicked() {
                                 pushed_buttons.push(message.clone());
@@ -166,7 +165,7 @@ impl eframe::App for MyEguiApp {
                         }
                     });
                 });
-            self.send_message_indecies.send(pushed_buttons).unwrap();
+            self.send_message_indices.send(pushed_buttons).unwrap();
         });
     }
 }

@@ -668,7 +668,7 @@ mod tests {
     #[tokio::test]
     // This tests the two cases that I know of in which the message queue will
     // contain duplicate messages as either PromiseRequest or AcceptResponse.
-    async fn test_multiple_promise_respones_and_accept_responses_in_message_queue() {
+    async fn test_multiple_promise_responses_and_accept_responses_in_message_queue() {
         // This can occur since the PromiseResponse message does not include the ballot number or the slot number
         let mut acceptors = HashMap::new();
         acceptors.insert(1, Acceptor::default());
@@ -729,9 +729,7 @@ mod tests {
         );
 
         // Let requests for acceptors 2 and 3 through, but not 0
-        // This will be enough for a querem and decide 7 both times.
-        // Then I should be able to
-
+        // This will be enough for a quorum and decide 7 both times.
         let _promise_response_1 = timeout(
             std::time::Duration::from_millis(100),
             local_message_controller.try_send_message(&Messages::PromiseRequest {
@@ -821,7 +819,7 @@ mod tests {
             5,
             "Not all messages have completed. Expected 1. PromiseResponse, 1. AcceptResponse, 3. PromiseRequest"
         );
-        // This will send the PromiseRequest triggering a duplicate PromiseRespone.  It will then send the PromiseResponse
+        // This will send the PromiseRequest triggering a duplicate PromiseResponse.  It will then send the PromiseResponse
         // So if this succeeds then the latest PromiseReturn was returned
         let _promise_response_1_duplicate = send_message_and_response(
             &Messages::PromiseRequest {
@@ -874,7 +872,7 @@ mod tests {
             "Not all messages have completed. Expected 1. AcceptResponse, 3. AcceptRequest"
         );
 
-        // This is the same case as the PromiseResponse.  So if this suceeds then it successfully returned the latest message
+        // This is the same case as the PromiseResponse.  So if this succeeds then it successfully returned the latest message
         let _accept_request_1 = send_message_and_response(
             &Messages::AcceptRequest {
                 acceptor_id: 1,
