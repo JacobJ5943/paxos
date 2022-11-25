@@ -73,15 +73,25 @@ impl LocalMessageController {
             },
         )
     }
+
+
+    /// If there are multiple messages that are Eq then the last message in the waiting list (Most recently sent) will be sent.
+    /// This is becuase I'm not sure what the return type of this function would be other wise.
+    /// 
+    /// The only cases of multiple messages being Eq in the queue would be PromiseReturn and AcceptReturn
+    /// In both cases I'm okay with this because only the latest message will have anybody listening to it.
+    /// This is becuase my current poc has the proposer locked behind a Mutex
+    /// 
+    /// This would need to be changed if a proposer was ever not behind a Mutex.  Though I'm not sure how the proposer would work if not behind a mutex
     pub async fn try_send_message(
         &mut self,
         message_to_send: &Messages,
     ) -> Result<Messages, ControllerErrors> {
         println!("trying to remove message {:?}", &message_to_send);
-        let x = dbg!(self
+        let mut x = self
             .current_messages
             .lock()
-            .await)
+            .await
             .iter()
             .enumerate()
             .filter(|(_, (message_in_vec, _))| message_in_vec == message_to_send)
@@ -89,14 +99,18 @@ impl LocalMessageController {
             .clone()
             .collect::<Vec<usize>>();
 
-        if x.len() > 1 {
-            unimplemented!(
-                "Some day I'll allow for message retries in this.  Today is not that day"
-            )
-        } else if x.is_empty() {
+        
+        if x.is_empty() {
             Err(ControllerErrors::MessageNotFound)
         } else {
-            let (message, sender) = self.current_messages.lock().await.remove(x[0]);
+            let last_index = x.pop().unwrap();
+            let (message, sender) = self.current_messages.lock().await.remove(last_index);
+
+            // Now clear out the previous messages
+            for x in x.into_iter().rev() {
+                self.current_messages.lock().await.remove(x);
+            }
+
             match &message {
                 Messages::AcceptRequest {
                     acceptor_id,

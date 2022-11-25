@@ -664,4 +664,261 @@ mod tests {
         );
         proposing_join_handle.await.unwrap();
     }
+
+    #[tokio::test]
+    // This tests the two cases that I know of in which the message queue will
+    // contain duplicate messages as either PromiseRequest or AcceptResponse.
+    async fn test_multiple_promise_respones_and_accept_responses_in_message_queue() {
+        // This can occur since the PromiseResponse message does not include the ballot number or the slot number
+        let mut acceptors = HashMap::new();
+        acceptors.insert(1, Acceptor::default());
+        acceptors.insert(2, Acceptor::default());
+        acceptors.insert(3, Acceptor::default());
+        let acceptors = acceptors
+            .into_iter()
+            .fold(HashMap::new(), |mut acc, (key, value)| {
+                acc.insert(key, Arc::new(Mutex::new(value)));
+                acc
+            });
+        let (mut local_message_controller, local_message_sender) =
+            LocalMessageController::new(acceptors.clone());
+
+        let mut acceptor_ids: Vec<usize> = acceptors.keys().copied().collect();
+
+        let acceptor_count = acceptor_ids.len();
+
+        let _proposing_join_handle = tokio::spawn(async move {
+            let mut proposers: HashMap<usize, Proposer> = HashMap::new();
+            proposers.insert(1, Proposer::new(1));
+            proposers.insert(2, Proposer::new(2));
+            proposers.insert(3, Proposer::new(3));
+            let proposer = proposers.get_mut(&1).unwrap();
+            let propose_result = proposer
+                .propose_value(
+                    7,
+                    0,
+                    &local_message_sender,
+                    &mut acceptor_ids,
+                    acceptor_count,
+                )
+                .await;
+
+            assert!(&propose_result.is_ok(), "{:?}", propose_result.unwrap_err());
+
+            assert_eq!(propose_result.unwrap(), 7);
+            let propose_result = proposer
+                .propose_value(
+                    7,
+                    1,
+                    &local_message_sender,
+                    &mut acceptor_ids,
+                    acceptor_count,
+                )
+                .await;
+
+            assert!(&propose_result.is_ok(), "{:?}", propose_result.unwrap_err());
+
+            assert_eq!(propose_result.unwrap(), 7);
+        });
+
+        sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            local_message_controller.current_messages.lock().await.len(),
+            3,
+            "Not all messages have completed"
+        );
+
+        // Let requests for acceptors 2 and 3 through, but not 0
+        // This will be enough for a querem and decide 7 both times.
+        // Then I should be able to
+
+        let _promise_response_1 = timeout(
+            std::time::Duration::from_millis(100),
+            local_message_controller.try_send_message(&Messages::PromiseRequest {
+                acceptor_id: 1,
+                proposer_id: 1,
+                slot_num: 0,
+                ballot_num: 1,
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let _prepare_request_2 = send_message_and_response(
+            &Messages::PromiseRequest {
+                acceptor_id: 2,
+                proposer_id: 1,
+                slot_num: 0,
+                ballot_num: 1,
+            },
+            &mut local_message_controller,
+            100,
+        )
+        .await
+        .unwrap();
+        let _prepare_request_3 = send_message_and_response(
+            &Messages::PromiseRequest {
+                acceptor_id: 3,
+                proposer_id: 1,
+                slot_num: 0,
+                ballot_num: 1,
+            },
+            &mut local_message_controller,
+            100,
+        )
+        .await
+        .unwrap();
+
+        sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            local_message_controller.current_messages.lock().await.len(),
+            4,
+            "Not all messages have completed"
+        );
+        let _accept_request_1 = timeout(
+            std::time::Duration::from_millis(100),
+            local_message_controller.try_send_message(&Messages::AcceptRequest {
+                acceptor_id: 1,
+                proposer_id: 1,
+                slot_num: 0,
+                ballot_num: 1,
+                value: 7,
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let _accept_request_2 = send_message_and_response(
+            &Messages::AcceptRequest {
+                acceptor_id: 2,
+                proposer_id: 1,
+                slot_num: 0,
+                ballot_num: 1,
+                value: 7,
+            },
+            &mut local_message_controller,
+            100,
+        )
+        .await
+        .unwrap();
+        let _accept_request_3 = send_message_and_response(
+            &Messages::AcceptRequest {
+                acceptor_id: 3,
+                proposer_id: 1,
+                slot_num: 0,
+                ballot_num: 1,
+                value: 7,
+            },
+            &mut local_message_controller,
+            100,
+        )
+        .await
+        .unwrap(); // This one might fail
+
+        sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            local_message_controller.current_messages.lock().await.len(),
+            5,
+            "Not all messages have completed. Expected 1. PromiseResponse, 1. AcceptResponse, 3. PromiseRequest"
+        );
+        // This will send the PromiseRequest triggering a duplicate PromiseRespone.  It will then send the PromiseResponse
+        // So if this succeeds then the latest PromiseReturn was returned
+        let _promise_response_1_duplicate = send_message_and_response(
+            &Messages::PromiseRequest {
+                acceptor_id: 1,
+                proposer_id: 1,
+                slot_num: 1,
+                ballot_num: 2,
+            },
+            &mut local_message_controller,
+            100,
+        )
+        .await
+        .unwrap();
+
+        sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            local_message_controller.current_messages.lock().await.len(),
+            3,
+            "Not all messages have completed. 1. AcceptResponse, 2. PromiseRequest"
+        );
+        let _prepare_request_2 = send_message_and_response(
+            &Messages::PromiseRequest {
+                acceptor_id: 2,
+                proposer_id: 1,
+                slot_num: 1,
+                ballot_num: 2,
+            },
+            &mut local_message_controller,
+            100,
+        )
+        .await
+        .unwrap();
+        let _prepare_request_3 = send_message_and_response(
+            &Messages::PromiseRequest {
+                acceptor_id: 3,
+                proposer_id: 1,
+                slot_num: 1,
+                ballot_num: 2,
+            },
+            &mut local_message_controller,
+            100,
+        )
+        .await
+        .unwrap_err(); // Already decided_value
+
+        sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            local_message_controller.current_messages.lock().await.len(),
+            4,
+            "Not all messages have completed. Expected 1. AcceptResponse, 3. AcceptRequest"
+        );
+
+        // This is the same case as the PromiseResponse.  So if this suceeds then it successfully returned the latest message
+        let _accept_request_1 = send_message_and_response(
+            &Messages::AcceptRequest {
+                acceptor_id: 1,
+                proposer_id: 1,
+                slot_num: 1,
+                ballot_num: 2,
+                value: 7,
+            },
+            &mut local_message_controller,
+            100,
+        )
+        .await
+        .unwrap();
+        sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            local_message_controller.current_messages.lock().await.len(),
+            2,
+            "Not all messages have completed. Expected 2. AcceptRequest"
+        );
+        let _accept_request_2 = send_message_and_response(
+            &Messages::AcceptRequest {
+                acceptor_id: 2,
+                proposer_id: 1,
+                slot_num: 1,
+                ballot_num: 2,
+                value: 7,
+            },
+            &mut local_message_controller,
+            100,
+        )
+        .await
+        .unwrap();
+        let _accept_request_3 = send_message_and_response(
+            &Messages::AcceptRequest {
+                acceptor_id: 3,
+                proposer_id: 1,
+                slot_num: 1,
+                ballot_num: 2,
+                value: 7,
+            },
+            &mut local_message_controller,
+            100,
+        )
+        .await
+        .unwrap_err(); // Already decided value
+    }
 }
