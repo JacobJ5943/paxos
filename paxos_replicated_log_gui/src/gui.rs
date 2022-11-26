@@ -4,7 +4,7 @@ use egui::{Align2, Color32, Stroke};
 use flume::{Receiver, Sender};
 use paxos_controllers::local_controller::Messages;
 
-use crate::Frame;
+use crate::Frames::Frame;
 
 pub fn run_gui(
     receive_frames: Receiver<Frame>,
@@ -67,7 +67,7 @@ impl eframe::App for MyEguiApp {
                 .scroll2([false, true])
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
-                        for (index, server) in frame.servers.iter().enumerate() {
+                        for (server_index, server) in frame.servers.iter().enumerate() {
                             egui::Frame::none()
                                 .stroke(Stroke {
                                     width: stroke_width,
@@ -100,14 +100,14 @@ impl eframe::App for MyEguiApp {
                                         ui.label("Propose Value");
                                         if ui
                                             .text_edit_singleline(
-                                                self.propose_value_buffers.get_mut(index).unwrap(),
+                                                self.propose_value_buffers.get_mut(server_index).unwrap(),
                                             )
                                             .changed()
                                         {
                                             // If i have a number 123456 and I try to insert a 'b' after the 3 it will not insert the 'b' and will move the cursor one space to the right
-                                            *self.propose_value_buffers.get_mut(index).unwrap() =
+                                            *self.propose_value_buffers.get_mut(server_index).unwrap() =
                                                 self.propose_value_buffers
-                                                    .get(index)
+                                                    .get(server_index)
                                                     .unwrap()
                                                     .chars()
                                                     .filter(|c| {
@@ -123,14 +123,14 @@ impl eframe::App for MyEguiApp {
                                         if ui.button("propose_value").clicked()
                                             && !self
                                                 .propose_value_buffers
-                                                .get(index)
+                                                .get(server_index)
                                                 .unwrap()
                                                 .is_empty()
                                         {
                                             self.waiting_proposed_values.push_back((
-                                                index,
+                                                server_index,
                                                 self.propose_value_buffers
-                                                    .get(index)
+                                                    .get(server_index)
                                                     .unwrap()
                                                     .parse::<usize>()
                                                     .unwrap(),

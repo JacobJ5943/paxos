@@ -41,8 +41,8 @@ dependencies = [
 name = "basic-paxos-lib-tests"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "basic-paxos-lib",
+ "paxos-controllers",
  "tokio",
 ]
 
@@ -264,6 +264,15 @@ dependencies = [
  "redox_syscall",
  "smallvec",
  "windows-sys",
+]
+
+[[package]]
+name = "paxos-controllers"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "basic-paxos-lib",
+ "tokio",
 ]
 
 [[package]]

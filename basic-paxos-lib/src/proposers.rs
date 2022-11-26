@@ -93,12 +93,12 @@ impl Proposer {
             //dbg!(&result);
             match (result, &mut working_promise) {
                 (Ok(accepted_value), None) => {
-                    if let Some(accepted_value) = accepted_value {
+                    if accepted_value.is_some() {
                         working_promise = Some(PromiseReturn {
                             highest_ballot_num: self.current_highest_ballot,
                             current_slot_num: proposing_slot,
                             highest_node_identifier: self.node_identifier,
-                            accepted_value: Some(accepted_value).map(|av| av.0),
+                            accepted_value: accepted_value.map(|av| av.0),
                         });
                     }
                 }
@@ -216,6 +216,7 @@ impl Proposer {
     }
 
     ///
+    /// TODO Fix this documentation.  I think it's now return Ok(decided_value) if any value was decided.  else Err
     /// The function to propose a value.
     ///
     /// Returns Ok(()) if the proposed value is decided
