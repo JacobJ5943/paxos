@@ -32,21 +32,10 @@ impl Proposer {
         }
     }
 
-    // Tests moved to basic-paxos-lib-tests
-
-    /// .
-    /// Sends the propose message to all acceptors specified by send_to_acceptors.
-    /// Returns Ok if all promises returned Ok(None)
+    /// Increased the current_highest_ballot and Sends the propose message to all acceptors specified by acceptor_identifiers.
     ///
-    /// Else Returns Err with the highest ballot number of all responses and the AcceptedValue with the highest matching ballot num.
-    ///
-    ///
-    /// # Errors
-    /// Returns
-    /// 1. The highest ballot number out of all the responses received
-    /// 2. The AcceptedValue which corresponds the highest ballot num of all the received responses that contain a AcceptedValue.
-    ///
-    /// This function will return an error if .
+    /// Returns Ok if a quorum of acceptors accepted the request and have not accepted a value already
+    /// else Err
     #[instrument(skip(send_to_acceptors))]
     async fn promise_quorum(
         &mut self,
@@ -145,12 +134,13 @@ impl Proposer {
         }
     }
 
+    /// Sends an accept message to all [Acceptors][`crate::acceptors::Acceptor`] in acceptor_identifier.  
+    /// After a majority of [Acceptors][`crate::acceptors::Acceptor`] have responded with a single value it is decided and Ok(<decided_value>) is returned.
+    /// If every [Acceptor][`crate::acceptors::Acceptor`] has responded and a value has not been decided Err(()) is returned.  It's up to the caller to retry
     ///
-    /// Sends an accept message to all acceptors.  After a majority of acceptors have responded with a single value it is decided and Ok(<decided_value>) is returned.
-    /// If every acceptor has responded and a value has not been decided Err(()) is returned.  It's up to the caller to retry
     ///
-    ///
-    /// Errors on case of no value decided
+    /// This will wait for a response from every [Acceptor][`crate::acceptors::Acceptor`] before finishing.
+    /// There is no timeout in the function itself so it must be implemented in [SendToAcceptors][`crate::SendToAcceptors`]
     #[instrument(skip(send_to_acceptors))]
     async fn accept_quorum(
         &mut self,
@@ -162,18 +152,13 @@ impl Proposer {
     ) -> Result<usize, ()> {
         let mut sending_accepts = Vec::new();
         for acceptor_id in acceptor_identifiers.iter() {
-            sending_accepts.push(
-                //AwaitingAccept {
-                //acceptor_id: *acceptor_id,
-                //}
-                send_to_acceptors.send_accept(
-                    *acceptor_id,
-                    proposing_value,
-                    proposing_slot,
-                    self.current_highest_ballot,
-                    self.node_identifier,
-                ),
-            );
+            sending_accepts.push(send_to_acceptors.send_accept(
+                *acceptor_id,
+                proposing_value,
+                proposing_slot,
+                self.current_highest_ballot,
+                self.node_identifier,
+            ));
         }
         let mut accept_futures_unsorted =
             futures::stream::FuturesUnordered::from_iter(sending_accepts.into_iter());
@@ -215,18 +200,14 @@ impl Proposer {
         }
     }
 
+    /// Returns Ok(decided_value) if this is the current slot
+    /// if there is a higher slot an acceptor has promised then this will return Err
+    /// If this proposer doesn't have the value for this slot it must reach out by
+    /// some other mechanism to get that value
     ///
-    /// TODO Fix this documentation.  I think it's now return Ok(decided_value) if any value was decided.  else Err
-    /// The function to propose a value.
     ///
-    /// Returns Ok(()) if the proposed value is decided
-    /// Returns Err(<decided_value>) if some other value is decided
-    ///
-    /// Panics if .
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if .
+    /// This function will complete until either a value is decided.
+    /// Once it does it will return Ok(decided_value)
     pub async fn propose_value(
         &mut self,
         initial_proposed_value: usize,
@@ -235,10 +216,8 @@ impl Proposer {
         acceptor_identifiers: &mut Vec<usize>,
         _total_acceptor_count: usize, // unused for now, but will probably be a config thing to allow for resizing.  This would determine the quorum based on the slot I suppose?
     ) -> Result<usize, ProposingErrors> {
-        // TODO This return type will need to be changed.  This error needs to be either a continuation error where the next slot number is given with the highest promised ballot num at that slot. // The other error type could be some kind of network error
         info!("Proposing_value");
 
-        // This is mut for the case where an acceptor has already accepted a value
         let mut proposing_value = initial_proposed_value;
 
         let mut decided_value = Err(());
@@ -278,7 +257,7 @@ impl Proposer {
                 if let Some(accepted_value) = accepted_value {
                     proposing_value = accepted_value.0;
                 }
-            }
+            } // end propose quorum while loop
 
             let quorum = ((acceptor_identifiers.len() as f64 / 2.0).floor()) as usize + 1;
 
@@ -307,9 +286,4 @@ impl Proposer {
             }
         }
     }
-}
-
-#[cfg(test)]
-mod prop_tests {
-    // I'm not sure how to test any of these here so instead they will be tested in the basic-paxos-lib-tests crate
 }

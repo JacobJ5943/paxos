@@ -4,21 +4,24 @@ use paxos_controllers::local_controller::{LocalMessageController, LocalMessageSe
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::{atomic::AtomicUsize, Arc};
-use tokio::sync::{Mutex, RwLock};
+use tokio::{
+    runtime::Runtime,
+    sync::{Mutex, RwLock},
+};
 
-use crate::Frames::Frame;
+use crate::frames::{self, Frame};
 
 #[derive(Debug, Default)]
 pub struct Server {
-    pub next_slot: Arc<AtomicUsize>, // why do I need to arc an atomic again?
+    pub next_slot: Arc<AtomicUsize>,
     pub proposer_id: usize,
     pub prop: Arc<Mutex<basic_paxos_lib::proposers::Proposer>>,
     pub acceptor: Arc<Mutex<basic_paxos_lib::acceptors::Acceptor>>,
-    pub decided_values: Arc<RwLock<Vec<usize>>>, // boo using arc so that the proposer can update this itself
+    pub decided_values: Arc<RwLock<Vec<usize>>>,
 }
 
 pub struct GuiListenerResult {
-    /// The receiver for the front end to receive Frame structs from the backend.
+    /// The receiver for the front end to receive [`Frame`][`crate::frames::Frame`] structs from the backend.
     receive_frames: Receiver<Frame>,
     /// The Sender for the front end to decide when messages are sent
     send_message_indices: Sender<Vec<Messages>>,
@@ -57,6 +60,9 @@ pub(crate) fn create_gui_listener(
 ///
 /// This is required so that the other servers learn about the values in a timely manner.  
 /// If this didn't occur the other servers would not update their decided_values until they propose a value.
+///
+/// This also avoids writing that catchup procedure since it depends on what's storing the decided values.  
+/// In this case [`Server::decided_values`]
 pub(crate) async fn update_decided_values(
     servers: &[Server],
     receive_decided_values: &Receiver<(usize, usize)>,
@@ -119,7 +125,8 @@ async fn update_next_slot(
 /// It's very important that send_frames be a bounded channel as the backend will send as many frames as it can.
 /// If it's a bounded(1) then the backend will only send a new frame when the front end has updated.  
 ///
-// Currently this will create a frame and then wait until the frontend has update to send it
+/// receive_propose_value is a Receiver<(proposer_id, proposing_valued)>
+// Currently this will create a frame and then wait until the frontend has updated to send it
 // This means that after the front end updates it's getting the frame that is generated not at that point of update, but the point of the previous update
 async fn the_function_that_actually_sends_the_messages(
     mut local_message_controller: LocalMessageController,
@@ -137,9 +144,8 @@ async fn the_function_that_actually_sends_the_messages(
 
     let (send_decided_values, receive_decided_values) = flume::unbounded::<(usize, usize)>();
     loop {
-        let server_frames =
-            crate::Frames::create_server_frames(&servers, &receive_decided_values).await;
-        // Get info on all of the serversQ
+        let server_frames = frames::create_server_frames(&servers, &receive_decided_values).await;
+        // Get info on all of the servers
         let frame = Frame {
             servers: server_frames,
             waiting_messages: local_message_controller
@@ -186,7 +192,6 @@ async fn the_function_that_actually_sends_the_messages(
     }
 }
 
-///
 /// This function will spawn a new Task which will propose the value.
 /// After that it will update matching_server.next_slot if applicable
 fn spawn_and_handle_propose_value(
@@ -258,8 +263,10 @@ fn spawn_and_handle_propose_value(
     });
 }
 
+/// Creates and starts the back_end returning everything needed for the front_end
 pub fn create_and_start_backend(
     server_count: usize,
+    tokio_runtime: &Runtime,
 ) -> (
     Receiver<Frame>,
     Sender<Vec<Messages>>,
@@ -273,8 +280,8 @@ pub fn create_and_start_backend(
             ..Default::default()
         });
     }
-    let tokio_runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
 
+    //let tokio_runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
     let mut acceptor_hashmap = HashMap::new();
     let proposer_hashmap = RwLock::new(HashMap::new());
     for server in servers.iter() {
@@ -289,13 +296,12 @@ pub fn create_and_start_backend(
     let (local_message_controller, local_message_sender) =
         tokio_runtime.block_on(async { LocalMessageController::new(acceptor_hashmap) });
 
-    let server_count = servers.len();
     let GuiListenerResult {
         receive_frames,
         send_message_indices,
         propose_value_sender,
     } = crate::back_end::create_gui_listener(
-        &tokio_runtime,
+        tokio_runtime,
         local_message_controller,
         local_message_sender,
         servers,

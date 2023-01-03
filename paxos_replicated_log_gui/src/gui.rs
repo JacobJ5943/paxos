@@ -4,7 +4,7 @@ use egui::{Align2, Color32, Stroke};
 use flume::{Receiver, Sender};
 use paxos_controllers::local_controller::Messages;
 
-use crate::Frames::Frame;
+use crate::frames::Frame;
 
 pub fn run_gui(
     receive_frames: Receiver<Frame>,
@@ -28,16 +28,21 @@ pub fn run_gui(
     );
 }
 
-//// EFRAME THINGS BELOW
 struct MyEguiApp {
+    /// The Bounded(1) channel used to receive frames from the backed
     receive_frames: Receiver<Frame>,
+    /// Tells the backend which messages in the queue to send
     send_message_indices: Sender<Vec<Messages>>,
+    /// The buffer for the propose value text box of each server
     propose_value_buffers: Vec<String>,
+    /// Sends the proposed value (proposer_id, proposing_value)
     propose_value_sender: Sender<(usize, usize)>,
+    /// If proposing too quickly a queue might develop and so this is to capture all of them
     waiting_proposed_values: VecDeque<(usize, usize)>,
 }
 
 impl MyEguiApp {
+    /// propose_value_sender is a Sender<(proposer_id, proposing_value)>
     fn new(
         _cc: &eframe::CreationContext<'_>,
         receive_frames: Receiver<Frame>,
@@ -63,7 +68,7 @@ impl eframe::App for MyEguiApp {
             let stroke_width = 2.0;
 
             egui::Window::new("Servers window")
-                .anchor(Align2::CENTER_TOP, [0.0, 0.0])
+                .anchor(Align2::LEFT_TOP, [0.0, 0.0])
                 .scroll2([false, true])
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
@@ -76,7 +81,7 @@ impl eframe::App for MyEguiApp {
                                 .show(ui, |ui| {
                                     ui.set_height(0.0);
                                     ui.set_width(
-                                        (full_window_size.x / frame.servers.len() as f32)
+                                        ((full_window_size.x - 30.0) / frame.servers.len() as f32) // - 30 for the scroll bar.  There's still an issue with the right server getting cut off
                                             - (stroke_width * 2.0),
                                     );
                                     ui.centered_and_justified(|ui| {
@@ -100,24 +105,29 @@ impl eframe::App for MyEguiApp {
                                         ui.label("Propose Value");
                                         if ui
                                             .text_edit_singleline(
-                                                self.propose_value_buffers.get_mut(server_index).unwrap(),
+                                                self.propose_value_buffers
+                                                    .get_mut(server_index)
+                                                    .unwrap(),
                                             )
                                             .changed()
                                         {
                                             // If i have a number 123456 and I try to insert a 'b' after the 3 it will not insert the 'b' and will move the cursor one space to the right
-                                            *self.propose_value_buffers.get_mut(server_index).unwrap() =
-                                                self.propose_value_buffers
-                                                    .get(server_index)
-                                                    .unwrap()
-                                                    .chars()
-                                                    .filter(|c| {
-                                                        HashSet::from([
-                                                            '0', '1', '2', '3', '4', '5', '6', '7',
-                                                            '8', '9',
-                                                        ])
-                                                        .contains(c)
-                                                    })
-                                                    .collect();
+                                            *self
+                                                .propose_value_buffers
+                                                .get_mut(server_index)
+                                                .unwrap() = self
+                                                .propose_value_buffers
+                                                .get(server_index)
+                                                .unwrap()
+                                                .chars()
+                                                .filter(|c| {
+                                                    HashSet::from([
+                                                        '0', '1', '2', '3', '4', '5', '6', '7',
+                                                        '8', '9',
+                                                    ])
+                                                    .contains(c)
+                                                })
+                                                .collect();
                                         }
 
                                         if ui.button("propose_value").clicked()
@@ -135,7 +145,6 @@ impl eframe::App for MyEguiApp {
                                                     .parse::<usize>()
                                                     .unwrap(),
                                             ));
-                                            println!("This would proposer the value")
                                         };
                                     });
                                 });

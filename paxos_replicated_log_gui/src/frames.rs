@@ -11,15 +11,15 @@ pub struct ServerFrame {
     pub acceptor_debug: String,
     pub decided_values: Vec<usize>,
 }
-// This is because I can't have tokio with egui boo
+
 pub struct Frame {
     pub servers: Vec<ServerFrame>,
     pub waiting_messages: Vec<Messages>,
 }
 
-/// Helper function used to create the ServerFrame structs for the current Frame
-/// 
-/// received_decided_values is the proposer broadcasts that it decided a value.
+/// Helper function used to create the [`ServerFrame`] structs for the current Frame
+///
+/// received_decided_values is how the proposer broadcasts that it decided a value.
 pub(crate) async fn create_server_frames(
     servers: &[Server],
     receive_decided_values: &Receiver<(usize, usize)>,

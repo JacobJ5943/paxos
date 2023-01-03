@@ -3,13 +3,13 @@ use tracing::{info, instrument};
 
 use crate::{HighestBallotPromised, HighestSlotPromised, PromiseReturn};
 
+///
 #[derive(Debug, Default, Clone)]
 pub struct Acceptor {
     pub promised_ballot_num: Option<usize>,
     pub promised_slot_num: usize,
 
-    // This is just set to 0 as once promised_ballot_num is not None then primmed_node_identifier will have a have
-    // This should probably be an option later
+    /// Used to break ties with the ballot_num
     pub promised_node_identifier: usize,
     pub accepted_value: Option<usize>,
 }
@@ -24,16 +24,14 @@ impl Acceptor {
 
     /// This is how an acceptor receives accept requests.
     ///
-    /// Returns Ok of the value Accepted by this acceptor if the ballot number is greater than or equal to what the acceptor has promised.
+    /// Returns Ok() if a value has already been accepted regardless of the request parameters
     ///
-    /// If the Acceptor had not accepted a value then if successful the value returned will match the value of the request.
+    /// For a value to be accepted the slot num must equal the [`Acceptor::promised_slot_num`]
+    ///     and ballot num must be greater than or equal to the [`Acceptor::promised_ballot_num`] for that slot
+    /// if so then Ok(value)
+    /// else Err
     ///
-    /// # Errors
-    ///
-    /// Should error if
-    /// 1. the self.promised_ballot_num is > ballot_num
-    /// 2. if self.promised_ballot_num is >= ballot_num but the node_identifier is less than the promised node identifier
-    ///
+    /// If the [Acceptor][`Acceptor`] had not accepted a value then if successful the value returned will match the value of the request.
     #[instrument]
     pub fn accept(
         &mut self,
@@ -82,16 +80,15 @@ impl Acceptor {
         }
     }
 
-    /// This is how an acceptor receives promise requests.
-    /// Will return Ok if the ballot_num is greater than the ballot_num already promised by this acceptor.
-    /// If they are the same the node identifier breaks the tie
+    /// An [Acceptor][`Acceptor`] will return Ok if
+    /// 1. the slot num is greater than or equal to the [already promised slot][`Acceptor::promised_slot_num`]
+    /// 2. If the slot num is equal then a value must not be already accepted.
+    /// 3. the ballot num is greater or equal to the already [already promised ballot][`Acceptor::promised_ballot_num`]
+    /// 4. If the ballot num is equal then node identifier must be greater than the [already promised node identifier][`Acceptor::promised_node_identifier`]
     ///
-    /// This Ok response will contain the accepted value by this acceptor if it has already accepted a value.
+    /// If any condition is not true then err.
     ///
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if the ballot_num is less than the ballot num already promised by this acceptor.
+    // TODO maybe add a constraint to have the slot num always be one greater instead of just greater.  Less error prone for the user
     pub fn promise(
         &mut self,
         ballot_num: usize,
@@ -113,7 +110,7 @@ impl Acceptor {
             return Err(PromiseReturn {
                 highest_ballot_num: self
                     .promised_ballot_num
-                    .expect("ballot nums are always increasing and never reset to 0"), // I think later I will make thtis a ball o t number per slot maybe?
+                    .expect("ballot nums are always increasing and never reset to 0"), // I think later I will make this a ball o t number per slot maybe?
                 current_slot_num: self.promised_slot_num,
                 highest_node_identifier: self.promised_node_identifier,
                 accepted_value: self.accepted_value,

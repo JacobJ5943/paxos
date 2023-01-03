@@ -1,22 +1,12 @@
-use hyper::server;
-use paxos_controllers::local_controller::{LocalMessageController};
-use std::{
-    collections::HashMap,
-    sync::Arc,
-};
-use crate::back_end::{Server, GuiListenerResult, create_and_start_backend};
+use crate::back_end::create_and_start_backend;
 use tracing::Level;
 
-use basic_paxos_lib::proposers::Proposer;
 use clap::{command, value_parser, Arg, ArgAction};
-use tokio::{
-    sync::{Mutex, RwLock},
-};
 
 use crate::gui::run_gui;
 
-mod Frames;
 mod back_end;
+mod frames;
 mod gui;
 
 fn get_matches() -> clap::ArgMatches {
@@ -35,7 +25,6 @@ fn get_matches() -> clap::ArgMatches {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = get_matches();
-    println!("Hello, world!");
 
     let subscriber = tracing_subscriber::FmtSubscriber::builder()
         // all spans/events with a level higher than TRACE (e.g, debug, info, warn, etc.)
@@ -46,8 +35,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::subscriber::set_global_default(subscriber).unwrap();
 
-    let server_count:usize = *args.get_one("ServerCount").unwrap();
-    let (receive_frames, send_message_indices, propose_value_sender) = create_and_start_backend(server_count);
+    let server_count: usize = *args.get_one("ServerCount").unwrap();
+    let tokio_runtime = tokio::runtime::Runtime::new().unwrap();
+    let (receive_frames, send_message_indices, propose_value_sender) =
+        create_and_start_backend(server_count, &tokio_runtime);
 
     run_gui(
         receive_frames,
@@ -58,4 +49,3 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
-

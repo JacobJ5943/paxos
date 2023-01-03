@@ -39,7 +39,7 @@ pub trait SendToAcceptors {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Eq, PartialEq)]
-pub struct HighestSlotPromised(pub usize); // let's have another type because eh I'll refactor later
+pub struct HighestSlotPromised(pub usize);
 
 impl Deref for HighestSlotPromised {
     type Target = usize;
@@ -50,18 +50,3 @@ impl Deref for HighestSlotPromised {
 }
 #[derive(Debug, Deserialize, Serialize, Clone, Eq, PartialEq)]
 pub struct HighestBallotPromised(pub Option<usize>);
-
-// These will contain the integration tests
-// The hard part about these tests is that I don't currently have a way to
-// run different parts at different times.  I can only run a proposer's full path
-//
-// I would like to split it up for testing, but I don't think that's necessarily required
-// Maybe when I do the server I can man in the middle it and control when messages send
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-        let result = 2 + 2;
-        assert_eq!(result, 4);
-    }
-}

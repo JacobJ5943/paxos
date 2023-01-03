@@ -36,6 +36,13 @@ pub enum Messages {
     },
 }
 
+/// The controller used to decide when messages are sent and received
+///
+/// This is useful when creating demos.
+///
+///
+/// It's design is to have a tokio::task listening for messages and then adding them to current_messages
+// Why don't I save off the handle for this task and add it to Drop?
 #[derive(Default)]
 pub struct LocalMessageController {
     pub acceptors: HashMap<usize, Arc<Mutex<Acceptor>>>, // <AcceptorIdentifier, Acceptor>
@@ -74,20 +81,15 @@ impl LocalMessageController {
         )
     }
 
-
-    /// If there are multiple messages that are Eq then the last message in the waiting list (Most recently sent) will be sent.
-    /// This is becuase I'm not sure what the return type of this function would be other wise.
-    /// 
-    /// The only cases of multiple messages being Eq in the queue would be PromiseReturn and AcceptReturn
-    /// In both cases I'm okay with this because only the latest message will have anybody listening to it.
-    /// This is becuase my current poc has the proposer locked behind a Mutex
-    /// 
-    /// This would need to be changed if a proposer was ever not behind a Mutex.  Though I'm not sure how the proposer would work if not behind a mutex
+    ///
+    /// Sends the [Messages][`Messages`] Eq to message_to_send.  If multiple [Messages][`Messages`] are Eq then all are removed from the queue with the Message more recently added sent.
+    ///
+    /// If there is no [message][`Messages`] Eq to message_to_send then Err
+    /// If there were other errors sending the [Messages][`Messages`] then Err
     pub async fn try_send_message(
         &mut self,
         message_to_send: &Messages,
     ) -> Result<Messages, ControllerErrors> {
-        println!("trying to remove message {:?}", &message_to_send);
         let mut x = self
             .current_messages
             .lock()
@@ -99,7 +101,6 @@ impl LocalMessageController {
             .clone()
             .collect::<Vec<usize>>();
 
-        
         if x.is_empty() {
             Err(ControllerErrors::MessageNotFound)
         } else {
@@ -139,9 +140,9 @@ impl LocalMessageController {
                     Ok(accept_response)
                 }
                 Messages::AcceptResponse {
-                    acceptor_id:_,
-                    proposer_id:_,
-                    accept_result:_,
+                    acceptor_id: _,
+                    proposer_id: _,
+                    accept_result: _,
                 } => match sender.send(message.clone()) {
                     Ok(()) => Ok(message),
                     Err(send_error) => Err(ControllerErrors::from(send_error)),
@@ -184,19 +185,19 @@ impl LocalMessageController {
 }
 
 // This should really be a bounded sender since it's just where to send the response
+/// loops infinitely adding every [`Messages`] received from receiver onto current_messages
 async fn add_messages_to_queue(
     current_messages: Arc<Mutex<Vec<(Messages, UnboundedSender<Messages>)>>>,
     mut receiver: tokio::sync::mpsc::UnboundedReceiver<(Messages, UnboundedSender<Messages>)>,
 ) {
     loop {
-        println!("waiting for that sweet sweet message");
         let incoming_message = receiver.recv().await.unwrap();
-        println!("We got a message {:?}", &incoming_message);
         current_messages.lock().await.push(incoming_message);
     }
 }
 
 #[derive(Debug, Clone)]
+/// The struct which implements [`basic_paxos_lib::SendToAcceptors`] to give to the proposer.
 pub struct LocalMessageSender {
     pub sender_to_controller: UnboundedSender<(Messages, UnboundedSender<Messages>)>, // The sender is so that the response can also be controlled
 }
